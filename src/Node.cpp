@@ -6,12 +6,37 @@ using namespace sophia;
 
 constexpr auto sMaxClosestNodes = 20; // Could push up to 23 without going over 1280 bytes, but dunno if its worth
 
-constexpr bool sDebugIterativeFindValue = false;
 constexpr bool sDebugIterativeClosestNodes = false;
-constexpr bool sDebugPut = false;
 
-inflight_t::inflight_t(net::io_service &pService, const u256 &pDest, const u256 &pID, Callback pCallback)
-    : timeout(pService, SOPHIA_TIMEOUT), id(pID), dest(pDest), callback(std::move(pCallback)) {}
+const char *SophiaErrorCategory::name() const noexcept { return "sophia protocol error"; }
+
+std::string SophiaErrorCategory::message(int ev) const {
+  switch ((SophiaErrorCode)ev) {
+  case SophiaErrorCode::eNoError:
+    return "0x0: eNoError";
+  case SophiaErrorCode::eUnspecified:
+    return "0x1: eUnspecified";
+  case SophiaErrorCode::eLocalStoreFull:
+    return "0x1300: eLocalStoreFull";
+  case SophiaErrorCode::eKeyAlreadyAssigned:
+    return "0x1301: eKeyAlreadyAssigned";
+  case SophiaErrorCode::eInvalidSignature:
+    return "0x1302: eInvalidSignature";
+  case SophiaErrorCode::eNotUpToDate:
+    return "0x1303: eNotUpToDate";
+  case SophiaErrorCode::eNotRegisted:
+    return "0x3000: eNotRegisted";
+  }
+  return std::string();
+}
+
+const SophiaErrorCategory &SophiaErrorCategory::instance() {
+  static SophiaErrorCategory sCategory;
+  return sCategory;
+}
+
+inflight_t::inflight_t(net::io_service &pService, Contact pDest, const u256 &pID, Callback pCallback)
+    : timeout(pService, SOPHIA_TIMEOUT), id(pID), dest(std::move(pDest)), callback(std::move(pCallback)) {}
 
 void Node::IterativeClosestNodesFunctor::operator()(ErrorCode pError, const Contact &pSource,
                                                     const std::vector<Contact> &pResults) {
@@ -76,7 +101,61 @@ void Node::IterativeClosestNodesFunctor::operator()(ErrorCode pError, const Cont
     if constexpr (sDebugIterativeClosestNodes)
       std::cout << node->self() << " Got all responses after " << context->searched.size() << " steps in "
                 << dur_t{Clock::now() - context->start} << std::endl;
+    auto lResults = context->searched;
+    for (const auto &lContact : pResults) {
+      if (std::find(lResults.begin(), lResults.end(), lContact) == lResults.end()) {
+        lResults.push_back(lContact);
+      }
+    }
 
+    std::sort(lResults.begin(), lResults.end(), [this](const Contact &pLeft, const Contact &pRight) {
+      return closerDist256(context->key.data(), pLeft.id.data(), pRight.id.data()) < 0;
+    });
+    lResults.resize(std::min((size_t)SOPHIA_K, lResults.size()));
+
+    context->callback(lResults);
+    delete context;
+  }
+}
+
+void Node::IterativePubsubClosestNodesFunctor::operator()(ErrorCode pError, const Contact &pSource,
+                                                          const std::vector<Contact> &pResults) {
+  context->markSearched(pSource);
+
+  if (!pResults.empty()) {
+    size_t lClosest = 0;
+
+    for (size_t i = 0; i < pResults.size(); i++) {
+      auto lCloser = closerDist256(context->key.data(), pResults[lClosest].id.data(), pResults[i].id.data());
+      if (lCloser > 0 && !context->isKnown(pResults[i]))
+        lClosest = i;
+    }
+
+    if (!context->isKnown(pResults[lClosest])) {
+      bool found = false;
+      for (auto it = context->inflight.begin(); it != context->inflight.end(); it++) {
+        auto lCloser = closerDist256(context->key.data(), pResults[lClosest].id.data(), it->id.data());
+        if (lCloser < 0) {
+          context->inflight.push_back(pResults[lClosest]);
+          node->sendPubsubClosestNodes(pResults[lClosest], context->topic, context->key, *this);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        for (const auto &lSearched : context->searched) {
+          auto lCloser = closerDist256(context->key.data(), pResults[lClosest].id.data(), lSearched.id.data());
+          if (lCloser < 0) {
+            context->inflight.push_back(pResults[lClosest]);
+            node->sendPubsubClosestNodes(pResults[lClosest], context->topic, context->key, *this);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (context->inflight.empty()) {
     auto lResults = context->searched;
     for (const auto &lContact : pResults) {
       if (std::find(lResults.begin(), lResults.end(), lContact) == lResults.end()) {
@@ -99,21 +178,7 @@ void Node::IterativeFindValueFunctor::operator()(ErrorCode pError, const Contact
                                                  const std::optional<Value> &pVal) {
   context->markSearched(pSource);
 
-  if constexpr (sDebugIterativeFindValue) {
-    std::cout << node->self() << " iterative find node step " << context->searched.size() << " for "
-              << dur_t{Clock::now() - context->start} << " from " << pSource << std::endl;
-    for (auto &lInflight : context->inflight)
-      std::cout << "\tI: " << lInflight << std::endl;
-    for (auto &lSearched : context->searched)
-      std::cout << "\tS: " << lSearched << std::endl;
-    for (auto &lResponse : pResults)
-      std::cout << "\tR: " << lResponse << std::endl;
-  }
-
   if (pVal && !context->found) {
-    /*std::cout << node->self() << " Got the value, responses after " << context->searched.size() << " steps in "
-              << dur_t{Clock::now() - context->start} << std::endl;*/
-
     context->callback(pVal);
     context->found = true;
   } else if (!pResults.empty()) {
@@ -124,18 +189,11 @@ void Node::IterativeFindValueFunctor::operator()(ErrorCode pError, const Contact
       if (lCloser > 0 && !context->isKnown(pResults[i]))
         lClosest = i;
     }
-
-    if constexpr (sDebugIterativeFindValue) {
-      std::cout << "Best " << pResults[lClosest] << ", known? " << context->isKnown(pResults[lClosest]) << std::endl;
-    }
-
     if (!context->isKnown(pResults[lClosest])) {
       bool found = false;
       for (auto it = context->inflight.begin(); it != context->inflight.end(); it++) {
         auto lCloser = closerDist256(context->key.data(), pResults[lClosest].id.data(), it->id.data());
         if (lCloser < 0) {
-          // std::cout << "Got a closest nodes than inflight: " << pResults[lClosest] << std::endl;
-
           context->inflight.push_back(pResults[lClosest]);
           node->sendFindValue(pResults[lClosest], context->key, *this);
           found = true;
@@ -146,8 +204,6 @@ void Node::IterativeFindValueFunctor::operator()(ErrorCode pError, const Contact
         for (const auto &lSearched : context->searched) {
           auto lCloser = closerDist256(context->key.data(), pResults[lClosest].id.data(), lSearched.id.data());
           if (lCloser < 0) {
-            // std::cout << "Got a closest nodes than searched: " << pResults[lClosest] << std::endl;
-
             context->inflight.push_back(pResults[lClosest]);
             node->sendFindValue(pResults[lClosest], context->key, *this);
             break;
@@ -158,8 +214,6 @@ void Node::IterativeFindValueFunctor::operator()(ErrorCode pError, const Contact
   }
 
   if (context->inflight.empty()) {
-    /*std::cout << node->self() << " Got all responses after " << context->searched.size() << " steps in "
-              << dur_t{Clock::now() - context->start} << std::endl;*/
     if (!context->found)
       context->callback({});
     delete context;
@@ -183,9 +237,6 @@ void Node::send(const Contact &pDest, const cbuff_view_t &pBuff) {
   randombytes_buf(lNonce, sNonceSize);
   if (crypto_box_detached(lCrypt, lMac, pBuff.data, pBuff.size, lNonce, pDest.id.data(),
                           keypair.privateKey.contained.data()) == 0) {
-    /*std::cout << "[NET] " << self() << " sending " << pMessLen << " bytes to: " << pDest << std::endl;
-    std::cout << "\tdata: " << buff_view_t{pBuffer, pMessLen} << std::endl;*/
-
     sock.async_send_to(boost::asio::const_buffer(lBuff, lMessSize), pDest.endpoint(),
                        [lMessSize, lBuff](const ErrorCode &pError, size_t pBytesWritten) {
                          if (pError != nullptr) {
@@ -221,8 +272,6 @@ void Node::recieve() {
           if (crypto_box_open_detached(lDecrypted.data(), lCrypt, lMac, lMessLen, lNonce, lSource.id.data(),
                                        keypair.privateKey.contained.data()) == 0) {
             cbuff_view_t lBuff{lDecrypted.data(), lMessLen};
-            /*std::cout << "[NET] " << self() << " received " << lMessLen << " bytes from: " << lSource << std::endl;
-            std::cout << "\tdata: " << buff_view_t{lBuffer, lMessLen} << std::endl;*/
             auto lCommand = (MessageType)lBuff.data[0];
             switch (lCommand) {
             case ePing:
@@ -237,22 +286,20 @@ void Node::recieve() {
             case eStoreValue:
               replyStore(lSource, lBuff);
               break;
-            case eClosestValues:
+
+            case ePubsubJoin:
+              replyPubsubJoin(lSource, lBuff);
+              break;
+            case ePubsubEvent:
+              forwardPubsubEvent(lSource, lBuff);
               break;
 
             case eNodesResult:
             case ePong:
             case eError:
-            case eValuesResult:
             case eValueResult:
+            case ePubsubNodesResult:
               recvResponse(lSource, lBuff);
-              break;
-
-            case ePubsubJoin:
-              break;
-            case ePubsubLeave:
-              break;
-            case ePubsubEvent:
               break;
             default:
               std::cout << "[NET] unexpected command identifier" << std::endl;
@@ -274,18 +321,19 @@ size_t Node::prepareCommand(const Contact &pDest, const u256 &pID, MessageType p
     lID = hashInflight(pDest.id, lToken);
   } while (inflights.find(lID) != inflights.end());
 
-  inflight_t lInflight{service, pID, pDest.id, pCallback};
+  inflight_t lInflight{service, pDest, pID, pCallback};
 
   lInflight.timeout.async_wait([this, lID, lToken](const ErrorCode &pError) {
     auto lRef = inflights.find(lID);
     if (pError != boost::asio::error::operation_aborted && lRef != inflights.end()) {
-      auto lEntry = routing.findEntry(lRef->second.dest);
+      auto lEntry = routing.findEntry(lRef->second.dest.id);
+      std::cout << "[NET] Inflight timeout " << self() << ", to " << lRef->second.dest << ", token: " << std::hex
+                << (htonl(lToken) >> 8) << ", " << lID << std::dec << ", has entry: " << (lEntry != nullptr)
+                << std::endl;
       if (lEntry != nullptr) {
         lEntry->sentCommands++;
-        lRef->second.callback(pError, lEntry->contact, lRef->second.id, {nullptr, 0});
       }
-      // std::cout << "[NET] Inflight timeout " << self() << ", to " << lRef->second.dest << ", token: " << std::hex <<
-      // lToken << std::dec << std::endl;
+      lRef->second.callback(boost::asio::error::timed_out, lRef->second.dest, lRef->second.id, {nullptr, 0});
       inflights.erase(lRef);
     }
   });
@@ -294,10 +342,6 @@ size_t Node::prepareCommand(const Contact &pDest, const u256 &pID, MessageType p
   memcpy(pBuffer + 1, &lToken, 3);
 
   inflights.emplace(lID, std::move(lInflight));
-
-  // std::cout << "[NET] Sending inflight " << self() << ", to " << pDest << ", token: " << readToken(pBuffer) <<
-  // std::endl;
-
   return lID;
 }
 
@@ -307,6 +351,14 @@ void Node::prepareReply(const Contact &pSource, MessageType pReplyType, const u8
   auto lEntry = routing.mayAddNewContact(pSource);
   if (lEntry != nullptr)
     lEntry->lastContact = Clock::now();
+}
+
+void Node::replyWithError(const Contact &pSource, const u8 *pCommandBuffer, SophiaErrorCode pError) {
+  u8 lReply[4 + 4];
+  prepareReply(pSource, eError, pCommandBuffer, lReply);
+  auto *lError = reinterpret_cast<uint32_t *>(lReply + 4);
+  *lError = htonl((uint32_t)pError);
+  send(pSource, {lReply, sizeof(lReply)});
 }
 
 void Node::recvResponse(const Contact &pSource, const cbuff_view_t &pBuff) {
@@ -325,7 +377,15 @@ void Node::recvResponse(const Contact &pSource, const cbuff_view_t &pBuff) {
   lInflight->second.timeout.cancel();
   routing.addRTT(pSource, lRTT.total_microseconds() / 1000000.f);
 
-  lInflight->second.callback(sNoError, pSource, lInflight->second.id, pBuff);
+  if (pBuff.data[0] != eError) {
+    lInflight->second.callback(sNoError, pSource, lInflight->second.id, pBuff);
+  } else {
+    assert(pBuff.size == 8);
+    const auto *lErrorPtr = reinterpret_cast<const uint32_t *>(pBuff.data + 4);
+    uint32_t lError = ntohl(*lErrorPtr);
+    lInflight->second.callback(ErrorCode(lError, SophiaErrorCategory::instance()), pSource, lInflight->second.id,
+                               pBuff);
+  }
 
   inflights.erase(lInflight);
 }
@@ -340,14 +400,14 @@ size_t Node::sendPing(const Contact &pDest, const Node::PingCallback &pCallback)
 
   auto lCallback = [pCallback, lRand](ErrorCode pError, const Contact &pSource, const u256 &pID,
                                       const cbuff_view_t &pBuff) {
-    if (pBuff.data[0] != ePong)
-      return;
-
     if (pError != nullptr) {
       if (pCallback)
         pCallback(pError, pSource);
       return;
     }
+
+    if (pBuff.data[0] != ePong)
+      return;
 
     if (pBuff.size != 1156 + 4) {
       // TODO Reply with an error
@@ -389,15 +449,15 @@ size_t Node::sendClosestNodes(const Contact &pDest, const u256 &pKey, const Node
 
   auto lCallback = [this, pCallback](ErrorCode pError, const Contact &pSource, const u256 &pID,
                                      const cbuff_view_t &pBuff) {
-    if (pBuff.data[0] != eNodesResult)
-      return;
-    // TODO Blacklist?
-
     if (pError != nullptr) {
       if (pCallback)
         pCallback(pError, pSource, {});
       return;
     }
+
+    if (pBuff.data[0] != eNodesResult)
+      return;
+    // TODO Blacklist?
 
     u8 lCount = pBuff.data[4];
     if (lCount > sMaxClosestNodes) {
@@ -413,22 +473,13 @@ size_t Node::sendClosestNodes(const Contact &pDest, const u256 &pKey, const Node
     for (u8 i = 0; i < lCount; i++) {
       lResult[i].read(lContactsBuff);
       routing.mayAddNewContact(lResult[i]);
-      /*std::cout << "\t\t" << buff_view_t{lContact.publicKey.data(), lContact.publicKey.size()}
-                << ", " << buff_view_t{lAddrBytes.data(), lAddrBytes.size()}
-                << ", " << lContact.port << std::endl;*/
     }
-    /*std::cout << "[DHT] " << self() << " recvNodesResult token " << readToken(pBuffer) << ", with " << (int)lCount
-              << " nodes from " << pSource << std::endl;*/
     if (pCallback)
       pCallback(sNoError, pSource, lResult);
   };
 
   size_t lToken = prepareCommand(pDest, pKey, eClosestNodes, lCommand, lCallback);
   memcpy(lCommand + 4, pKey.data(), 32);
-
-  /*std::cout << "[DHT] " << self() << " sendClosestNodes with token " << readToken(lCommand) << " with ID "
-            << pKey.view() << " to " << pDest << std::endl;*/
-
   send(pDest, {lCommand, sizeof(lCommand)});
   return lToken;
 }
@@ -447,12 +498,7 @@ void Node::replyClosestNodes(const Contact &pSource, const cbuff_view_t &pBuff) 
 
   for (size_t i = 0; i < lCount; i++) {
     lContacts[i].write(lContactsBuff);
-    /*std::cout << "\t\t" << buff_view_t{lContact.publicKey.data(), lContact.publicKey.size()}
-              << ", " << buff_view_t{lAddrBytes.data(), lAddrBytes.size()}
-              << ", " << lContact.port << std::endl;*/
   }
-  /*std::cout << "[DHT] " << self() << " replyClosestNodes token " << readToken(pData) << ", with "
-            << (int)lCount << " nodes to " << pSource << std::endl;*/
   send(pSource, {lReply, sizeof(lReply)});
 }
 
@@ -463,8 +509,6 @@ void Node::iterativeClosestNodes(const u256 &pKey, const Node::IterativeClosestN
   lContext->inflight.resize(lCount);
 
   for (const auto &lContact : lContext->inflight) {
-    if constexpr (sDebugIterativeClosestNodes)
-      std::cout << self() << " iterativeClosestNodes to " << lContact << std::endl;
     sendClosestNodes(lContact, pKey, IterativeClosestNodesFunctor{lContext, this});
   }
 }
@@ -537,22 +581,13 @@ void Node::iterativeFindValue(const u256 &pKey, const Node::IterativeFindValueCa
   lContext->inflight.resize(lCount);
 
   for (const auto &lContact : lContext->inflight) {
-    if constexpr (sDebugIterativeFindValue)
-      std::cout << self() << " iterativeFindValue to " << lContact << std::endl;
     sendFindValue(lContact, pKey, IterativeFindValueFunctor{lContext, this});
   }
 }
 
 size_t Node::sendStore(const Contact &pDest, const Value &pValue, const Node::StoreCallback &pCallback) {
   auto lCallback = [pCallback](ErrorCode pError, const Contact &pSource, const u256 &pID, const cbuff_view_t &pBuff) {
-    if (pError != nullptr) {
-      if (pCallback)
-        pCallback(pError, pSource);
-      return;
-    }
-
-    if (pCallback)
-      pCallback(sNoError, pSource);
+    pCallback(pError, pSource);
   };
 
   size_t lSize = 4 + pValue.serializedSize();
@@ -568,10 +603,7 @@ size_t Node::sendStore(const Contact &pDest, const Value &pValue, const Node::St
 }
 
 void Node::replyStore(const Contact &pSource, const cbuff_view_t &pBuff) {
-  u8 lReply[4 + 4];
-
-  prepareReply(pSource, eError, pBuff.data, lReply);
-  uint32_t lErrorCode = eNoError;
+  auto lErrorCode = (uint32_t)SophiaErrorCode::eNoError;
 
   cbuff_view_t lReadBuff = pBuff;
   lReadBuff.seek(4);
@@ -580,10 +612,213 @@ void Node::replyStore(const Contact &pSource, const cbuff_view_t &pBuff) {
   db.mayStoreValue(lValue);
   // FIXME Handle some errors and set lErrorCode
 
-  uint32_t lNErrorCode = htonl(lErrorCode);
-  memcpy(lReply + 4, &lNErrorCode, sizeof(lNErrorCode));
+  if (lValue.type == Value::Type::eTopicBootstrap) {
+    auto lKnownTopic = topics.find(lValue.id);
+    if (lKnownTopic == topics.end()) {
+      // std::cout << self() << " hosting topic " << lValue.id << std::endl;
+      auto &lContext = topics[lValue.id];
+      lContext.routing.myID = keypair.publicKey;
+      lContext.routing.mayAddNewContact(pSource);
+    }
+  }
 
+  replyWithError(pSource, pBuff.data, (SophiaErrorCode)lErrorCode);
+}
+
+size_t Node::sendPubsubJoin(const Contact &pDest, const u256 &pTopicID, const Node::PubsubJoinCallback &pCallback) {
+  u8 lCommand[4 + 32];
+
+  auto lCallback = [this, pTopicID, pCallback](ErrorCode pError, const Contact &pSource, const u256 &pID,
+                                               const cbuff_view_t &pBuff) {
+    if (pError != nullptr) {
+      if (pCallback)
+        pCallback(pError, pSource, {});
+      return;
+    }
+
+    if (pBuff.data[0] != ePubsubNodesResult)
+      return;
+    // TODO Blacklist?
+
+    u8 lCount = pBuff.data[4];
+    if (lCount > sMaxClosestNodes) {
+      std::cout << "[NET] Incorrect count in nodes result" << std::endl;
+    }
+    std::vector<Contact> lResult(lCount);
+    size_t lContactsBuffSize = sEntrySize * lCount;
+    if (lContactsBuffSize != pBuff.size - 5) {
+      // TODO pCallback(malformed error, pSource, {});
+      return;
+    }
+    cbuff_view_t lContactsBuff{pBuff.data + 5, lContactsBuffSize};
+    auto lTopicContext = topics.find(pTopicID);
+    if (lTopicContext == topics.end())
+      return;
+    for (u8 i = 0; i < lCount; i++) {
+      lResult[i].read(lContactsBuff);
+      lTopicContext->second.routing.mayAddNewContact(lResult[i]);
+    }
+    if (pCallback)
+      pCallback(sNoError, pSource, lResult);
+  };
+
+  size_t lToken = prepareCommand(pDest, pTopicID, ePubsubJoin, lCommand, lCallback);
+  memcpy(lCommand + 4, pTopicID.data(), 32);
+  send(pDest, {lCommand, sizeof(lCommand)});
+
+  // std::cout << self() << " sending join to " << pDest << ", " << readToken(lCommand) << ", " << std::hex << lToken <<
+  // std::dec << ", " << inflights.size() << std::endl;
+
+  return lToken;
+}
+
+void Node::replyPubsubJoin(const Contact &pSource, const cbuff_view_t &pBuff) {
+  u256 lID;
+  memcpy(lID.data(), pBuff.data + 4, lID.size());
+  std::array<Contact, sMaxClosestNodes> lContacts;
+
+  auto lTopicContext = topics.find(lID);
+  if (lTopicContext == topics.end()) {
+    // std::cout << self() << " ignoring " << pSource << " join, unknown topic." << std::endl;
+    replyWithError(pSource, pBuff.data, SophiaErrorCode::eNotRegisted);
+    return;
+  }
+
+  u8 lCount = lTopicContext->second.routing.closestNodes(lID, lContacts.data(), lContacts.size(), &pSource.id);
+  size_t lContactsBuffSize = sEntrySize * lCount;
+  u8 lReply[4 + 1 + lContactsBuffSize];
+  prepareReply(pSource, ePubsubNodesResult, pBuff.data, lReply);
+
+  lTopicContext->second.routing.mayAddNewContact(pSource);
+
+  lReply[4] = lCount;
+  buff_view_t lContactsBuff{lReply + 5, lContactsBuffSize};
+
+  for (size_t i = 0; i < lCount; i++) {
+    lContacts[i].write(lContactsBuff);
+  }
   send(pSource, {lReply, sizeof(lReply)});
+
+  /*std::cout << self() << " replied to " << pSource << " join with " << lCount << " entries" << std::endl;
+  for (size_t i = 0; i < lCount; i++) {
+    std::cout << "\t" << lContacts[i] << std::endl;
+  }*/
+}
+
+size_t Node::sendPubsubClosestNodes(const Contact &pDest, const u256 &pTopic, const u256 &pKey,
+                                    const Node::ClosestNodesCallback &pCallback) {
+  u8 lCommand[4 + 32];
+
+  auto lCallback = [this, pCallback, pTopic](ErrorCode pError, const Contact &pSource, const u256 &pID,
+                                             const cbuff_view_t &pBuff) {
+    if (pError != nullptr) {
+      if (pCallback)
+        pCallback(pError, pSource, {});
+      return;
+    }
+
+    if (pBuff.data[0] != ePubsubNodesResult)
+      return;
+    // TODO Blacklist?
+
+    u8 lCount = pBuff.data[4];
+    if (lCount > sMaxClosestNodes) {
+      std::cout << "[NET] Incorrect count in nodes result" << std::endl;
+    }
+    std::vector<Contact> lResult(lCount);
+    size_t lContactsBuffSize = sEntrySize * lCount;
+    if (lContactsBuffSize != pBuff.size - 5) {
+      // TODO pCallback(malformed error, pSource, {});
+      return;
+    }
+    cbuff_view_t lContactsBuff{pBuff.data + 5, lContactsBuffSize};
+    auto lTopicContext = topics.find(pTopic);
+    if (lTopicContext == topics.end())
+      return;
+    for (u8 i = 0; i < lCount; i++) {
+      lResult[i].read(lContactsBuff);
+      lTopicContext->second.routing.mayAddNewContact(lResult[i]);
+    }
+    if (pCallback)
+      pCallback(sNoError, pSource, lResult);
+  };
+
+  size_t lToken = prepareCommand(pDest, pKey, ePubsubClosestNodes, lCommand, lCallback);
+  memcpy(lCommand + 4, pTopic.data(), 32);
+  memcpy(lCommand + 36, pKey.data(), 32);
+
+  send(pDest, {lCommand, sizeof(lCommand)});
+  return lToken;
+}
+
+void Node::replyPubsubClosestNodes(const Contact &pSource, const cbuff_view_t &pBuff) {
+  u256 lTopic;
+  memcpy(lTopic.data(), pBuff.data + 4, lTopic.size());
+  u256 lID;
+  memcpy(lID.data(), pBuff.data + 36, lID.size());
+  std::array<Contact, sMaxClosestNodes> lContacts;
+
+  auto lTopicContext = topics.find(lTopic);
+  if (lTopicContext == topics.end())
+    return;
+
+  u8 lCount = lTopicContext->second.routing.closestNodes(lID, lContacts.data(), lContacts.size(), &pSource.id);
+  size_t lContactsBuffSize = sEntrySize * lCount;
+  u8 lReply[4 + 1 + lContactsBuffSize];
+  prepareReply(pSource, ePubsubNodesResult, pBuff.data, lReply);
+
+  lReply[4] = lCount;
+  buff_view_t lContactsBuff{lReply + 5, lContactsBuffSize};
+
+  for (size_t i = 0; i < lCount; i++) {
+    lContacts[i].write(lContactsBuff);
+  }
+  send(pSource, {lReply, sizeof(lReply)});
+}
+
+void Node::iterativePubsubClosestNodes(const u256 &pTopic, const u256 &pKey,
+                                       const Node::IterativeClosestNodesCallback &pCallback) {
+  auto lTopicContext = topics.find(pTopic);
+  if (lTopicContext == topics.end())
+    return;
+
+  auto &lRouting = lTopicContext->second.routing;
+  auto lContext = new IterativePubsubContext<Node::IterativeClosestNodesCallback>(lRouting, pTopic, pKey, pCallback);
+
+  size_t lCount = lRouting.closestNodes(pKey, lContext->inflight.data(), SOPHIA_ALPHA, nullptr);
+  lContext->inflight.resize(lCount);
+
+  for (const auto &lContact : lContext->inflight) {
+    sendPubsubClosestNodes(lContact, pTopic, pKey, IterativePubsubClosestNodesFunctor{lContext, this});
+  }
+}
+
+size_t Node::sendPubsubEvent(const Contact &pDest, const Event &pEvent, const Node::StoreCallback &pCallback) {
+  auto lCallback = [pCallback](ErrorCode pError, const Contact &pSource, const u256 &pID, const cbuff_view_t &pBuff) {
+    if (pError != nullptr) {
+      if (pCallback)
+        pCallback(pError, pSource);
+      return;
+    }
+
+    if (pCallback)
+      pCallback(sNoError, pSource);
+  };
+
+  size_t lSize = 4 + pEvent.serializedSize();
+  u8 lCommand[lSize];
+
+  size_t lToken = prepareCommand(pDest, pDest.id, ePubsubEvent, lCommand, lCallback);
+  buff_view_t lBuff{lCommand + 4, lSize - 4};
+  pEvent.write(lBuff, true);
+
+  send(pDest, {lCommand, sizeof(lCommand)});
+
+  return lToken;
+}
+
+void Node::forwardPubsubEvent(const Contact &pSource, const cbuff_view_t &pBuff) {
+  // TODO
 }
 
 Node::Node(net::io_service &pService, const char *pDBPath, const passphrase_t &pPassphrase,
@@ -598,32 +833,32 @@ Contact Node::self() const {
   return {keypair.publicKey, sock.local_endpoint().address(), sock.local_endpoint().port()};
 }
 
-void Node::bootstrap(const Contact &pContact) {
+void Node::bootstrap(const Contact &pContact, const BootstrapCallback &pCallback) {
   routing.mayAddNewContact(pContact);
 
   sendClosestNodes(pContact, keypair.publicKey,
-                   [this](ErrorCode pError, const Contact &pSource, std::vector<Contact> pResult) {
-                     if (!pError)
-                       iterativeClosestNodes(keypair.publicKey, [this](std::vector<Contact> pResult) {
-                         // routing.debug();
-                         refreshBuckets();
-                       });
+                   [this, pCallback](ErrorCode pError, const Contact &pSource, std::vector<Contact> pResult) {
+                     if (pError != nullptr)
+                       throw sophia_fatal(pError, "error while requesting closest nodes for bootstrap");
+                     iterativeClosestNodes(keypair.publicKey, [this, pCallback](std::vector<Contact> pResult) {
+                       // routing.debug();
+                       refreshBuckets();
+                       subscribeToKnownTopics();
+                       pCallback();
+                     });
                    });
 }
 
 void Node::put(const Value &pValue, const PutCallback &pCallback) {
   db.mayStoreValue(pValue);
-  this->iterativeClosestNodes(pValue.id, [this, pValue, pCallback](const std::vector<Contact> pContacts) {
+  iterativeClosestNodes(pValue.id, [this, pValue, pCallback](const std::vector<Contact> pContacts) {
     assert(!pContacts.empty());
     auto lCount = std::make_shared<size_t>();
     *lCount = pContacts.size();
-    if constexpr (sDebugPut)
-      std::cout << self() << " storing " << pValue.id.view() << " on " << pContacts.size() << " nodes" << std::endl;
     for (const auto &lContact : pContacts) {
+      // std::cout << self() << " put " << pValue.id << " on " << lContact << std::endl;
       sendStore(lContact, pValue, [this, pCallback, lCount](const ErrorCode pError, const Contact &pContact) {
         (*lCount)--;
-        if constexpr (sDebugPut)
-          std::cout << self() << " stored at " << pContact << " still got " << *lCount << std::endl;
         if (*lCount == 0) {
           if (pCallback)
             pCallback();
@@ -631,6 +866,48 @@ void Node::put(const Value &pValue, const PutCallback &pCallback) {
       });
     }
   });
+}
+
+u256 Node::put(Value::Type pType, uint32_t pRevision, const u256 &pParent, const cbuff_view_t &pData,
+               const Node::PutCallback &pCallback) {
+  Value lValue;
+  sensitive_t<u512> privateKey;
+  assert(privateKey->size() == crypto_sign_SECRETKEYBYTES);
+  static_assert(lValue.id.size() == crypto_sign_PUBLICKEYBYTES);
+  SOPHIA_CCALL(crypto_sign_keypair(lValue.id.data(), privateKey->data()));
+
+  lValue.type = pType;
+  lValue.revision = pRevision;
+  lValue.parent = pParent;
+
+  lValue.data.resize(pData.size);
+  memcpy(lValue.data.data(), pData.data, pData.size);
+  lValue.signature = lValue.computeSignature(privateKey);
+
+  if (pRevision < 0xFFFFFF) // if upgradable, store the private key for future updates
+    db.storePrivKey(lValue.id, privateKey);
+
+  put(lValue, pCallback);
+
+  return lValue.id;
+}
+
+void Node::update(const u256 &pID, uint32_t pNewRevision, const cbuff_view_t &pData,
+                  const Node::PutCallback &pCallback) {
+  assert(pNewRevision <= 0xFFFFFF);
+  assert(pData.size <= 1024);
+  auto lResult = db.loadValue(pID.data());
+  assert(lResult);
+  auto lValue = *lResult;
+  assert(lValue.revision < pNewRevision);
+  auto privateKey = db.loadPrivKey(pID);
+  assert(privateKey);
+
+  lValue.data.resize(pData.size);
+  memcpy(lValue.data.data(), pData.data, pData.size);
+  lValue.computeSignature(*privateKey);
+
+  put(lValue, pCallback);
 }
 
 void Node::get(const u256 &pKey, const GetCallback &pCallback) { iterativeFindValue(pKey, pCallback); }
@@ -644,4 +921,79 @@ void Node::refreshBuckets() {
       // if (i == routing.buckets.size() - 1) debugRouteTable();
     });
   }
+}
+
+u256 Node::createTopic(const JoinCallback &pJoinCallback, const EventCallback &pEventCallback) {
+  Value lTopicBootstrap;
+
+  u256 lPublicKey;
+  sensitive_t<u512> lPrivateKey;
+  assert(lPrivateKey->size() == crypto_sign_SECRETKEYBYTES);
+  static_assert(lPublicKey.size() == crypto_sign_PUBLICKEYBYTES);
+  SOPHIA_CCALL(crypto_sign_keypair(lPublicKey.data(), lPrivateKey->data()));
+
+  lTopicBootstrap.id = lPublicKey;
+  memset(lTopicBootstrap.parent.data(), 0, lTopicBootstrap.parent.size());
+  lTopicBootstrap.revision = 0xFFFFFF;
+  lTopicBootstrap.type = Value::Type::eTopicBootstrap;
+  lTopicBootstrap.signature = lTopicBootstrap.computeSignature(lPrivateKey);
+
+  db.storePrivKey(lTopicBootstrap.id, lPrivateKey);
+
+  auto &lContext = topics[lPublicKey];
+  lContext.routing.myID = keypair.publicKey;
+
+  // std::cout << self() << " created topic " << lTopicBootstrap.id << std::endl;
+  put(lTopicBootstrap,
+      [this, lPublicKey, pJoinCallback, pEventCallback]() { subscribe(lPublicKey, pJoinCallback, pEventCallback); });
+
+  return lPublicKey;
+}
+
+void Node::subscribe(const u256 &pTopicID, const JoinCallback &pJoinCallback, const EventCallback &pEventCallback) {
+  auto lKnownTopic = topics.find(pTopicID);
+
+  if (lKnownTopic != topics.end() && pEventCallback && lKnownTopic->second.callback) {
+    throw std::runtime_error("already registered topic");
+  }
+
+  auto &lContext = topics[pTopicID];
+  lContext.callback = pEventCallback;
+  lContext.routing.myID = keypair.publicKey;
+
+  iterativeClosestNodes(pTopicID, [this, pTopicID, pJoinCallback](const std::vector<Contact> pContacts) {
+    assert(!pContacts.empty());
+    auto lCount = std::make_shared<size_t>();
+    *lCount = pContacts.size();
+    for (const auto &lContact : pContacts) {
+      sendPubsubJoin(lContact, pTopicID,
+                     [this, pJoinCallback, lCount](const ErrorCode pError, const Contact &pContact,
+                                                   const std::vector<Contact> &pContacts) {
+                       (*lCount)--;
+                       // std::cout << "[NET] Topic subscribe join response, " << *lCount << " to go, " << std::endl;
+                       if (*lCount == 0) {
+                         if (pJoinCallback)
+                           pJoinCallback();
+                       }
+                     });
+    }
+  });
+}
+
+void Node::subscribeToKnownTopics() {
+  // TODO iterate database for eTopicBootstrap values and subscribe to them with empty callback
+}
+
+void Node::publish(const u256 &pTopicID, u8 pEventType, u16 pEventExtra, const cbuff_view_t &pData) {
+  auto lContext = topics.find(pTopicID);
+  assert(lContext != topics.end()); // can't publish to an unsubscribed topic
+  Event lEvent;
+  lEvent.topic = pTopicID;
+  lEvent.source = keypair.hashPublicKey;
+  lEvent.height = 0;
+  lEvent.type = pEventType;
+  lEvent.extra = pEventExtra;
+  lEvent.data.resize(pData.size);
+  memcpy(lEvent.data.data(), pData.data, pData.size);
+  lEvent.computeSignature(keypair.hashPrivateKey);
 }

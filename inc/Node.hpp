@@ -4,6 +4,7 @@
 #include <memory>
 
 #include <boost/functional/hash.hpp>
+#include <utility>
 
 #include "Database.hpp"
 #include "Table.hpp"
@@ -14,26 +15,24 @@ class Node;
 
 enum MessageType {
   eError = 0x00,
-  ePing = 0x01,
-  ePong = 0x02,
 
-  eClosestNodes = 0x10,
-  eClosestValues = 0x11,
+  ePing = 0x10,
+  eClosestNodes = 0x11,
   eFindValue = 0x12,
   eStoreValue = 0x13,
 
-  eNodesResult = 0x20,
-  eValuesResult = 0x21,
+  ePong = 0x20,
+  eNodesResult = 0x21,
   eValueResult = 0x22,
 
   ePubsubJoin = 0x30,
-  ePubsubLeave = 0x31,
-  ePubsubClosestNodes = 0x32,
-  ePubsubNodesResult = 0x33,
-  ePubsubEvent = 0x34,
+  ePubsubClosestNodes = 0x31,
+  ePubsubEvent = 0x32,
+
+  ePubsubNodesResult = 0x38,
 };
 
-enum SophiaError {
+enum class SophiaErrorCode {
   eNoError = 0x0,
   eUnspecified = 0x1,
 
@@ -41,16 +40,24 @@ enum SophiaError {
   eKeyAlreadyAssigned = 0x1301,
   eInvalidSignature = 0x1302,
   eNotUpToDate = 0x1303,
+
+  eNotRegisted = 0x3000,
+};
+
+struct SophiaErrorCategory : boost::system::error_category {
+  const char *name() const noexcept override;
+  std::string message(int ev) const override;
+  static const SophiaErrorCategory &instance();
 };
 
 struct inflight_t {
   using Callback = std::function<void(ErrorCode, const Contact &, const u256 &, const cbuff_view_t &)>;
   net::deadline_timer timeout;
   u256 id;
-  u256 dest;
+  Contact dest;
   Callback callback;
 
-  inflight_t(net::io_service &pService, const u256 &pDest, const u256 &pID, Callback pCallback);
+  inflight_t(net::io_service &pService, Contact pDest, const u256 &pID, Callback pCallback);
 
   inflight_t(inflight_t &&pOther) = default;
 };
@@ -62,10 +69,10 @@ template <typename TCallbackType> struct IterativeContext {
   std::vector<Contact> inflight, searched;
   bool found = false;
 
-  IterativeContext(const u256 &pKey, const TCallbackType &pCallback)
-      : start(Clock::now()), key(pKey), callback(pCallback), inflight(SOPHIA_ALPHA) {}
+  IterativeContext(const u256 &pKey, TCallbackType pCallback)
+      : start(Clock::now()), key(pKey), callback(std::move(pCallback)), inflight(SOPHIA_ALPHA) {}
 
-  ~IterativeContext() {}
+  virtual ~IterativeContext() = default;
 
   bool isKnown(const Contact &pOther) const {
     return std::find(inflight.begin(), inflight.end(), pOther) != inflight.end() ||
@@ -81,6 +88,16 @@ template <typename TCallbackType> struct IterativeContext {
     }
     searched.push_back(pInflight);
   }
+};
+
+template <typename TCallbackType> struct IterativePubsubContext : public IterativeContext<TCallbackType> {
+  u256 topic;
+  Table &routing;
+
+  IterativePubsubContext(Table &pRouting, const u256 &pTopic, const u256 &pKey, TCallbackType pCallback)
+      : IterativeContext<TCallbackType>(pKey, pCallback), topic(pTopic), routing(pRouting) {}
+
+  ~IterativePubsubContext() override = default;
 };
 
 class Node {
@@ -100,8 +117,16 @@ class Node {
 
   Database db;
   udp::socket sock;
-  keypair_t keypair;
+  keypairs_t keypair;
+
   Table routing;
+
+  struct TopicContext {
+    using EventCallback = std::function<void(const Event &)>;
+    Table routing;
+    EventCallback callback;
+  };
+  std::unordered_map<u256, TopicContext, array_hasher_t<u256::sSize>> topics;
 
   udp::endpoint lastDist;
   buff_t<sBuffSize> recvBuff;
@@ -116,6 +141,7 @@ class Node {
 
   void prepareReply(const Contact &pSource, MessageType pReplyType, const u8 *pCommandBuffer, u8 *pReplyBuffer);
   void recvResponse(const Contact &pSource, const cbuff_view_t &pBuff);
+  void replyWithError(const Contact &pSource, const u8 *pCommandBuffer, SophiaErrorCode pError);
 
   size_t hashInflight(const u256 &pDest, uint32_t pToken);
 
@@ -155,22 +181,66 @@ class Node {
   using StoreCallback = std::function<void(ErrorCode pError, const Contact &pSource)>;
   size_t sendStore(const Contact &pDest, const Value &pValue, const StoreCallback &pCallback);
   void replyStore(const Contact &pSource, const cbuff_view_t &pBuff);
+  void storeOnClosests(const Value &pValue, const IterativeClosestNodesCallback &pCallback);
+
+  using PubsubJoinCallback =
+      std::function<void(ErrorCode pError, const Contact &pSource, const std::vector<Contact> &)>;
+  size_t sendPubsubJoin(const Contact &pDest, const u256 &pTopicID, const PubsubJoinCallback &pCallback);
+  void replyPubsubJoin(const Contact &pSource, const cbuff_view_t &pBuff);
+
+  struct IterativePubsubClosestNodesFunctor {
+    IterativePubsubContext<IterativeClosestNodesCallback> *context;
+    Node *node;
+    void operator()(ErrorCode pError, const Contact &pSource, const std::vector<Contact> &pResults);
+  };
+
+  size_t sendPubsubClosestNodes(const Contact &pDest, const u256 &pTopic, const u256 &pKey,
+                                const ClosestNodesCallback &pCallback);
+  void replyPubsubClosestNodes(const Contact &pSource, const cbuff_view_t &pBuff);
+  void iterativePubsubClosestNodes(const u256 &pTopic, const u256 &pKey,
+                                   const IterativeClosestNodesCallback &pCallback);
+
+  size_t sendPubsubEvent(const Contact &pDest, const Event &pEvent, const StoreCallback &pCallback);
+  void forwardPubsubEvent(const Contact &pSource, const cbuff_view_t &pBuff);
+
+  void subscribeToKnownTopics();
 
 public:
   Node(net::io_service &pService, const char *pDBPath, const passphrase_t &pPassphrase, const udp::endpoint &pEndpoint);
 
   Contact self() const;
 
-  void bootstrap(const Contact &pContact);
+  using BootstrapCallback = std::function<void()>;
+  void bootstrap(const Contact &pContact, const BootstrapCallback &pCallback);
   void refreshBuckets();
-
-  using PutCallback = std::function<void()>;
-  void put(const Value &pValue, const PutCallback &pCallback);
 
   using GetCallback = std::function<void(const std::optional<Value> &)>;
   void get(const u256 &pKey, const GetCallback &pCallback);
 
-  inline void debugRouteTable() { routing.debug(); }
+  using PutCallback = std::function<void()>;
+  void put(const Value &pValue, const PutCallback &pCallback);
+  u256 put(Value::Type pType, uint32_t pRevision, const u256 &pParent, const cbuff_view_t &pData,
+           const PutCallback &pCallback);
+  void update(const u256 &pID, uint32_t pNewRevision, const cbuff_view_t &pData, const PutCallback &pCallback);
+
+  using JoinCallback = std::function<void()>;
+  using EventCallback = TopicContext::EventCallback;
+  u256 createTopic(const JoinCallback &pJoinCallback, const EventCallback &pEventCallback);
+  void subscribe(const u256 &pTopicID, const JoinCallback &pJoinCallback, const EventCallback &pEventCallback);
+  void publish(const u256 &pTopicID, u8 pEventType, u16 pEventExtra, const cbuff_view_t &pData);
+
+#ifdef SOPHIA_EXTRA_API
+  inline const Table &routingTable() const { return routing; }
+  inline Table &topicRoutingTable(const u256 &pTopic) { return topics[pTopic].routing; }
+  using SimplePingCallback = std::function<void()>;
+  inline void ping(const Contact &pContact, const SimplePingCallback &pCb) {
+    sendPing(pContact, [pCb](ErrorCode pError, const Contact &pSource) { pCb(); });
+  }
+  using SimpleClosestNodesCallback = IterativeClosestNodesCallback;
+  inline void closestNodes(const u256 &pID, const SimpleClosestNodesCallback &pCb) {
+    iterativeClosestNodes(pID, [pCb](const std::vector<Contact> &pContacts) { pCb(pContacts); });
+  }
+#endif
 };
 
 } // namespace sophia

@@ -134,6 +134,8 @@ int main(int argc, char **argv) {
     std::function<void(boost::system::error_code)> lLeaseRefresher;
     lLeaseRefresher = [lUPnPLeaseTime, &lLeaseRefresh, &lLeaseRefresher,
                        lSelfContact](const boost::system::error_code &pError) {
+      if (pError != nullptr)
+        throw sophia_fatal(pError, "error while refreshing upnp lease");
       upnpConfigure(lSelfContact.port, lUPnPLeaseTime);
       lLeaseRefresh.expires_at(lLeaseRefresh.expires_at() + lUPnPLeaseTime);
       lLeaseRefresh.async_wait(lLeaseRefresher);

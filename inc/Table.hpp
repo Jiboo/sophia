@@ -22,7 +22,23 @@ struct Table {
 
   void addRTT(const Contact &pContact, float pTime);
 
-  void debug() const;
+#ifdef SOPHIA_EXTRA_API
+  inline void debug() const {
+    std::cout << "Routing table for " << myID << std::endl;
+    for (size_t i = 0; i < buckets.size(); i++) {
+      for (const auto &lEntry : buckets[i])
+        std::cout << "\t" << i << ": " << lEntry.contact << ", " << dist256(myID.data(), lEntry.contact.id.data())
+                  << ", " << clzDist256(myID.data(), lEntry.contact.id.data()) << std::endl;
+    }
+  }
+  inline size_t countNodes() const {
+    size_t lResult = 0;
+    for (const auto &bucket : buckets) {
+      lResult += bucket.size();
+    }
+    return lResult;
+  }
+#endif
 };
 
 } // namespace sophia

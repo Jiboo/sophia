@@ -18,6 +18,8 @@ add_definitions(-DSOPHIA_PWHASH_FAST)
 file(GLOB_RECURSE SOPHIA_INC "inc/**.hpp")
 file(GLOB_RECURSE SOPHIA_SRC "src/**.cpp")
 file(GLOB_RECURSE SOPHIA_GTESTS "tst/gtests/**.cpp")
+#file(GLOB_RECURSE SOPHIA_GTESTS "tst/gtests/pubsub.cpp")
+#file(GLOB_RECURSE SOPHIA_GTESTS "tst/gtests/kademlia.cpp")
 
 add_library(sophia ${SOPHIA_INC} ${SOPHIA_SRC})
 target_link_libraries(sophia

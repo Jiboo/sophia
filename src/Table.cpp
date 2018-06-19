@@ -114,15 +114,6 @@ void Table::addRTT(const Contact &pContact, float pTime) {
   }
 }
 
-void Table::debug() const {
-  std::cout << "Routing table for " << myID << std::endl;
-  for (size_t i = 0; i < buckets.size(); i++) {
-    for (const auto &lEntry : buckets[i])
-      std::cout << "\t" << i << ": " << lEntry.contact << ", " << dist256(myID.data(), lEntry.contact.id.data()) << ", "
-                << clzDist256(myID.data(), lEntry.contact.id.data()) << std::endl;
-  }
-}
-
 int Table::firstNonEmptyBucket() {
   int lResult = -1;
   for (int lIndex = 0; lIndex < int(buckets.size()); lIndex++) {

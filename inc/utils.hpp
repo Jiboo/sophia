@@ -9,6 +9,7 @@
 #include <experimental/filesystem>
 
 #include <boost/asio.hpp>
+#include <utility>
 
 #include <sodium.h>
 
@@ -30,6 +31,13 @@ using ErrorCode = boost::system::error_code;
 
 static ErrorCode sNoError = ErrorCode(boost::system::errc::success, boost::system::generic_category());
 static ErrorCode sTimeoutError = ErrorCode(boost::system::errc::timed_out, boost::system::generic_category());
+
+class sophia_fatal : public std::runtime_error {
+public:
+  inline sophia_fatal(ErrorCode pError, const char *pDesc)
+      : std::runtime_error(std::string(pDesc) + " (" + std::to_string(pError.value()) + ": " + pError.message() + ")") {
+  }
+};
 
 using u8 = uint8_t;
 using u16 = uint16_t;
@@ -55,6 +63,8 @@ std::ostream &operator<<(std::ostream &pOS, const cbuff_view_t &pBuff);
 void parseHex(const buff_view_t &pDest, const std::string_view &pSource);
 
 template <const size_t TSize> struct buff_t : public std::array<u8, TSize> {
+  static constexpr size_t sSize = TSize;
+
   buff_t() = default;
   bool operator==(const buff_t<TSize> &pOther) {
     return memcmp(std::array<u8, TSize>::data(), pOther.data(), TSize) == 0;
@@ -67,6 +77,16 @@ template <const size_t TSize> struct buff_t : public std::array<u8, TSize> {
 
 void readBuff(const buff_view_t &pDest, cbuff_view_t &pSource);
 void writeBuff(buff_view_t &pDest, const cbuff_view_t &pSource);
+
+template <typename T> void readField(T *pDest, cbuff_view_t &pSource) {
+  buff_view_t lDest{(u8 *)pDest, sizeof(T)};
+  readBuff(lDest, pSource);
+}
+
+template <typename T> void writeField(buff_view_t &pDest, const T &pSource) {
+  cbuff_view_t lSource{(u8 *)&pSource, sizeof(T)};
+  writeBuff(pDest, lSource);
+}
 
 template <const size_t TSize> std::ostream &operator<<(std::ostream &pOS, const buff_t<TSize> &pBuff) {
   size_t lHexLen = pBuff.size() * 2 + 1;
@@ -93,7 +113,9 @@ template <typename T> struct sensitive_t {
   T contained;
 
   sensitive_t() { sodium_mlock(contained.data(), contained.size()); }
-  explicit sensitive_t(const T &pInit) : contained(pInit) { sodium_mlock(contained.data(), contained.size()); }
+  explicit sensitive_t(T pInit) : contained(std::move(std::move(std::move(pInit)))) {
+    sodium_mlock(contained.data(), contained.size());
+  }
 
   ~sensitive_t() {
     sodium_memzero(contained.data(), contained.size());
@@ -105,12 +127,14 @@ template <typename T> struct sensitive_t {
   const T *operator->() const { return &contained; }
 };
 
-using privatekey_t = sensitive_t<u256>;
 using passphrase_t = sensitive_t<std::string>;
 
-struct keypair_t {
+struct keypairs_t {
   u256 publicKey;
-  privatekey_t privateKey;
+  sensitive_t<u256> privateKey;
+
+  u256 hashPublicKey;
+  sensitive_t<u512> hashPrivateKey;
 };
 
 template <typename T> T rand() {

@@ -14,8 +14,10 @@ class Database {
   sqlite3_stmt *hasValueStmt = nullptr;
   sqlite3_stmt *insValueStmt = nullptr;
   sqlite3_stmt *selValueStmt = nullptr;
+  sqlite3_stmt *insPrivKeyStmt = nullptr;
+  sqlite3_stmt *selPrivKeyStmt = nullptr;
 
-  privatekey_t secretKey;
+  sensitive_t<u256> secretKey; // derived from passphrase
 
   static int sqlTrace(unsigned pMask, void *pContext, void *pParamP, void *pParamX);
   static void sqlClzDist(sqlite3_context *pContext, int pArgc, sqlite3_value **pValues);
@@ -31,17 +33,20 @@ class Database {
     return lResult;
   }
 
-  keypair_t initialize(const passphrase_t &pPassphrase);
+  keypairs_t initialize(const passphrase_t &pPassphrase);
 
 public:
   explicit Database(const char *pPath);
   ~Database();
 
-  keypair_t loadProfile(const passphrase_t &pPassphrase);
+  keypairs_t loadProfile(const passphrase_t &pPassphrase);
 
-  int32_t getRevision(const u8 *pKey);
-  std::optional<Value> loadValue(const u8 *pKey);
+  int32_t getRevision(const u8 *pID);
+  std::optional<Value> loadValue(const u8 *pID);
   void mayStoreValue(const Value &pValue);
+
+  void storePrivKey(const u256 &pID, const sensitive_t<u512> &pPrivKey);
+  std::optional<sensitive_t<u512>> loadPrivKey(const u256 &pID);
 
   sqlite3 *getSQLite();
 };
