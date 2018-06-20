@@ -233,10 +233,10 @@ void Node::send(const Contact &pDest, const cbuff_view_t &pBuff) {
   u8 *lNonce = lBuff + sNonceOffset;
   u8 *lMac = lBuff + sMacOffset;
   u8 *lCrypt = lBuff + sHeaderSize;
-  memcpy(lBuff, keypair.publicKey.data(), keypair.publicKey.size());
+  memcpy(lBuff, keypair.msgPK.data(), keypair.msgPK.size());
   randombytes_buf(lNonce, sNonceSize);
   if (crypto_box_detached(lCrypt, lMac, pBuff.data, pBuff.size, lNonce, pDest.id.data(),
-                          keypair.privateKey.contained.data()) == 0) {
+                          keypair.msgSK.contained.data()) == 0) {
     sock.async_send_to(boost::asio::const_buffer(lBuff, lMessSize), pDest.endpoint(),
                        [lMessSize, lBuff](const ErrorCode &pError, size_t pBytesWritten) {
                          if (pError != nullptr) {
@@ -254,62 +254,62 @@ void Node::send(const Contact &pDest, const cbuff_view_t &pBuff) {
 }
 
 void Node::recieve() {
-  sock.async_receive_from(
-      boost::asio::buffer(recvBuff.data(), sBuffSize), lastDist, [this](ErrorCode pError, size_t pBytesRecv) {
-        if (pError != nullptr) {
-          std::cout << "[NET] Got error on recv: " << pError.message() << std::endl;
-        } else {
-          Contact lSource;
-          lSource.address = lastDist.address();
-          lSource.port = lastDist.port();
-          memcpy(lSource.id.data(), recvBuff.data(), lSource.id.size());
-          size_t lMessLen = pBytesRecv - sHeaderSize;
-          buff_t<sBuffSize - sHeaderSize> lDecrypted;
-          u8 *lNonce = recvBuff.data() + sNonceOffset;
-          u8 *lMac = recvBuff.data() + sMacOffset;
-          u8 *lCrypt = recvBuff.data() + sHeaderSize;
+  sock.async_receive_from(boost::asio::buffer(recvBuff.data(), sBuffSize), lastDist,
+                          [this](ErrorCode pError, size_t pBytesRecv) {
+                            if (pError != nullptr) {
+                              std::cout << "[NET] Got error on recv: " << pError.message() << std::endl;
+                            } else {
+                              Contact lSource;
+                              lSource.address = lastDist.address();
+                              lSource.port = lastDist.port();
+                              memcpy(lSource.id.data(), recvBuff.data(), lSource.id.size());
+                              size_t lMessLen = pBytesRecv - sHeaderSize;
+                              buff_t<sBuffSize - sHeaderSize> lDecrypted;
+                              u8 *lNonce = recvBuff.data() + sNonceOffset;
+                              u8 *lMac = recvBuff.data() + sMacOffset;
+                              u8 *lCrypt = recvBuff.data() + sHeaderSize;
 
-          if (crypto_box_open_detached(lDecrypted.data(), lCrypt, lMac, lMessLen, lNonce, lSource.id.data(),
-                                       keypair.privateKey.contained.data()) == 0) {
-            cbuff_view_t lBuff{lDecrypted.data(), lMessLen};
-            auto lCommand = (MessageType)lBuff.data[0];
-            switch (lCommand) {
-            case ePing:
-              replyPing(lSource, lBuff);
-              break;
-            case eClosestNodes:
-              replyClosestNodes(lSource, lBuff);
-              break;
-            case eFindValue:
-              replyFindValue(lSource, lBuff);
-              break;
-            case eStoreValue:
-              replyStore(lSource, lBuff);
-              break;
+                              if (crypto_box_open_detached(lDecrypted.data(), lCrypt, lMac, lMessLen, lNonce,
+                                                           lSource.id.data(), keypair.msgSK.contained.data()) == 0) {
+                                cbuff_view_t lBuff{lDecrypted.data(), lMessLen};
+                                auto lCommand = (MessageType)lBuff.data[0];
+                                switch (lCommand) {
+                                case ePing:
+                                  replyPing(lSource, lBuff);
+                                  break;
+                                case eClosestNodes:
+                                  replyClosestNodes(lSource, lBuff);
+                                  break;
+                                case eFindValue:
+                                  replyFindValue(lSource, lBuff);
+                                  break;
+                                case eStoreValue:
+                                  replyStore(lSource, lBuff);
+                                  break;
 
-            case ePubsubJoin:
-              replyPubsubJoin(lSource, lBuff);
-              break;
-            case ePubsubEvent:
-              forwardPubsubEvent(lSource, lBuff);
-              break;
+                                case ePubsubJoin:
+                                  replyPubsubJoin(lSource, lBuff);
+                                  break;
+                                case ePubsubEvent:
+                                  forwardPubsubEvent(lSource, lBuff);
+                                  break;
 
-            case eNodesResult:
-            case ePong:
-            case eError:
-            case eValueResult:
-            case ePubsubNodesResult:
-              recvResponse(lSource, lBuff);
-              break;
-            default:
-              std::cout << "[NET] unexpected command identifier" << std::endl;
-            }
-          } else {
-            std::cout << "[NET] Error while opening message, ignoring." << std::endl;
-          }
-        }
-        recieve();
-      });
+                                case eNodesResult:
+                                case ePong:
+                                case eError:
+                                case eValueResult:
+                                case ePubsubNodesResult:
+                                  recvResponse(lSource, lBuff);
+                                  break;
+                                default:
+                                  std::cout << "[NET] unexpected command identifier" << std::endl;
+                                }
+                              } else {
+                                std::cout << "[NET] Error while opening message, ignoring." << std::endl;
+                              }
+                            }
+                            recieve();
+                          });
 }
 
 size_t Node::prepareCommand(const Contact &pDest, const u256 &pID, MessageType pCommandType, u8 *pBuffer,
@@ -617,7 +617,7 @@ void Node::replyStore(const Contact &pSource, const cbuff_view_t &pBuff) {
     if (lKnownTopic == topics.end()) {
       // std::cout << self() << " hosting topic " << lValue.id << std::endl;
       auto &lContext = topics[lValue.id];
-      lContext.routing.myID = keypair.publicKey;
+      lContext.routing.myID = keypair.msgPK;
       lContext.routing.mayAddNewContact(pSource);
     }
   }
@@ -825,22 +825,20 @@ Node::Node(net::io_service &pService, const char *pDBPath, const passphrase_t &p
            const udp::endpoint &pEndpoint)
     : service(pService), db(pDBPath), sock(pService, pEndpoint) {
   keypair = db.loadProfile(pPassphrase);
-  routing.myID = keypair.publicKey;
+  routing.myID = keypair.msgPK;
   recieve();
 }
 
-Contact Node::self() const {
-  return {keypair.publicKey, sock.local_endpoint().address(), sock.local_endpoint().port()};
-}
+Contact Node::self() const { return {keypair.msgPK, sock.local_endpoint().address(), sock.local_endpoint().port()}; }
 
 void Node::bootstrap(const Contact &pContact, const BootstrapCallback &pCallback) {
   routing.mayAddNewContact(pContact);
 
-  sendClosestNodes(pContact, keypair.publicKey,
+  sendClosestNodes(pContact, keypair.msgPK,
                    [this, pCallback](ErrorCode pError, const Contact &pSource, std::vector<Contact> pResult) {
                      if (pError != nullptr)
                        throw sophia_fatal(pError, "error while requesting closest nodes for bootstrap");
-                     iterativeClosestNodes(keypair.publicKey, [this, pCallback](std::vector<Contact> pResult) {
+                     iterativeClosestNodes(keypair.msgPK, [this, pCallback](std::vector<Contact> pResult) {
                        // routing.debug();
                        refreshBuckets();
                        subscribeToKnownTopics();
@@ -915,8 +913,8 @@ void Node::get(const u256 &pKey, const GetCallback &pCallback) { iterativeFindVa
 void Node::refreshBuckets() {
   // debugRouteTable();
   for (size_t i = 0; i < routing.buckets.size(); i++) {
-    auto lRandID = randSuffix(keypair.publicKey.data(), i);
-    assert(clzDist256(lRandID.data(), keypair.publicKey.data()) >= i);
+    auto lRandID = randSuffix(keypair.msgPK.data(), i);
+    assert(clzDist256(lRandID.data(), keypair.msgPK.data()) >= i);
     iterativeClosestNodes(lRandID, [this, i](std::vector<Contact> pResult) {
       // if (i == routing.buckets.size() - 1) debugRouteTable();
     });
@@ -941,7 +939,7 @@ u256 Node::createTopic(const JoinCallback &pJoinCallback, const EventCallback &p
   db.storePrivKey(lTopicBootstrap.id, lPrivateKey);
 
   auto &lContext = topics[lPublicKey];
-  lContext.routing.myID = keypair.publicKey;
+  lContext.routing.myID = keypair.msgPK;
 
   // std::cout << self() << " created topic " << lTopicBootstrap.id << std::endl;
   put(lTopicBootstrap,
@@ -959,7 +957,7 @@ void Node::subscribe(const u256 &pTopicID, const JoinCallback &pJoinCallback, co
 
   auto &lContext = topics[pTopicID];
   lContext.callback = pEventCallback;
-  lContext.routing.myID = keypair.publicKey;
+  lContext.routing.myID = keypair.msgPK;
 
   iterativeClosestNodes(pTopicID, [this, pTopicID, pJoinCallback](const std::vector<Contact> pContacts) {
     assert(!pContacts.empty());
@@ -989,11 +987,11 @@ void Node::publish(const u256 &pTopicID, u8 pEventType, u16 pEventExtra, const c
   assert(lContext != topics.end()); // can't publish to an unsubscribed topic
   Event lEvent;
   lEvent.topic = pTopicID;
-  lEvent.source = keypair.hashPublicKey;
+  lEvent.source = keypair.eventPK;
   lEvent.height = 0;
   lEvent.type = pEventType;
   lEvent.extra = pEventExtra;
   lEvent.data.resize(pData.size);
   memcpy(lEvent.data.data(), pData.data, pData.size);
-  lEvent.computeSignature(keypair.hashPrivateKey);
+  lEvent.computeSignature(keypair.eventSK);
 }

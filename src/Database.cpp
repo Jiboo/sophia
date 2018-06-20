@@ -152,23 +152,23 @@ keypairs_t Database::initialize(const passphrase_t &pPassphrase) {
   SOPHIA_CCALL(crypto_secretbox_detached(lVerifyCrypt.data(), lVerifyMac.data(), lVerify.data(), lVerify.size(),
                                          lVerifyNonce.data(), lSecretKey->data()));
 
-  u256 lPubK;
-  sensitive_t<u256> lPrivK;
-  static_assert(lPubK.size() == crypto_box_PUBLICKEYBYTES);
-  assert(lPrivK->size() == crypto_box_SECRETKEYBYTES);
-  SOPHIA_CCALL(crypto_box_keypair(lPubK.data(), lPrivK->data()));
+  u256 lEventPK;
+  sensitive_t<u512> lEventSK;
+  static_assert(lEventPK.size() == crypto_sign_PUBLICKEYBYTES);
+  assert(lEventSK->size() == crypto_sign_SECRETKEYBYTES);
+  SOPHIA_CCALL(crypto_sign_keypair(lEventPK.data(), lEventSK->data()));
 
   auto lSKNonce = rand<u192>();
   u128 lSKMac;
-  u256 lSKCrypt;
+  u512 lSKCrypt;
   static_assert(lSKNonce.size() == crypto_secretbox_NONCEBYTES);
   static_assert(lSKMac.size() == crypto_secretbox_MACBYTES);
-  assert(lSKCrypt.size() == lPrivK->size());
-  SOPHIA_CCALL(crypto_secretbox_detached(lSKCrypt.data(), lSKMac.data(), lPrivK->data(), lPrivK->size(),
+  assert(lSKCrypt.size() == lEventSK->size());
+  SOPHIA_CCALL(crypto_secretbox_detached(lSKCrypt.data(), lSKMac.data(), lEventSK->data(), lEventSK->size(),
                                          lSKNonce.data(), lSecretKey->data()));
 
   SOPHIA_CCALL(sqlite3_exec(db, "BEGIN;", nullptr, nullptr, nullptr));
-  insertProfileEntry("publickey", lPubK.view());
+  insertProfileEntry("publickey", lEventPK.view());
   insertProfileEntry("pass_nonce", lPassNonce.view());
 
   insertProfileEntry("verify_mac", lVerifyMac.view());
@@ -180,16 +180,16 @@ keypairs_t Database::initialize(const passphrase_t &pPassphrase) {
   insertProfileEntry("privatekey_crypt", lSKCrypt.view());
   SOPHIA_CCALL(sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr));
 
-  u256 lHashPubK;
-  sensitive_t<u512> lHashPrivK;
-  static_assert(lHashPubK.size() == crypto_sign_PUBLICKEYBYTES);
-  assert(lHashPrivK->size() == crypto_sign_SECRETKEYBYTES);
-  assert(lPrivK->size() == crypto_sign_SEEDBYTES);
-  SOPHIA_CCALL(crypto_sign_seed_keypair(lHashPubK.data(), lHashPrivK->data(), lPrivK->data()));
+  u256 lMsgPK;
+  sensitive_t<u256> lMsgSK;
+  static_assert(lMsgPK.size() == crypto_box_PUBLICKEYBYTES);
+  assert(lMsgSK->size() == crypto_box_SECRETKEYBYTES);
+  SOPHIA_CCALL(crypto_sign_ed25519_pk_to_curve25519(lMsgPK.data(), lEventPK.data()));
+  SOPHIA_CCALL(crypto_sign_ed25519_sk_to_curve25519(lMsgSK->data(), lEventSK->data()));
 
   // std::cout << "[SDB] Initialized in " << dur_t{Clock::now() - lStart} << std::endl;
 
-  return {lPubK, lPrivK, lHashPubK, lHashPrivK};
+  return {lEventPK, lEventSK, lMsgPK, lMsgSK};
 }
 
 Database::Database(const char *pPath) {
@@ -233,7 +233,7 @@ keypairs_t Database::loadProfile(const passphrase_t &pPassphrase) {
     return initialize(pPassphrase);
   }
 
-  auto lPubK = retreiveProfileEntry<u256>("publickey");
+  auto lEventPK = retreiveProfileEntry<u256>("publickey");
   auto lPassNonce = retreiveProfileEntry<u128>("pass_nonce");
 
   auto lVerifyMac = retreiveProfileEntry<u128>("verify_mac");
@@ -242,7 +242,7 @@ keypairs_t Database::loadProfile(const passphrase_t &pPassphrase) {
 
   auto lSKMac = retreiveProfileEntry<u128>("privatekey_mac");
   auto lSKNonce = retreiveProfileEntry<u192>("privatekey_nonce");
-  auto lSKCrypt = retreiveProfileEntry<u256>("privatekey_crypt");
+  auto lSKCrypt = retreiveProfileEntry<u512>("privatekey_crypt");
 
   static_assert(lPassNonce.size() == crypto_pwhash_SALTBYTES);
   assert(secretKey->size() >= crypto_pwhash_BYTES_MIN);
@@ -258,18 +258,18 @@ keypairs_t Database::loadProfile(const passphrase_t &pPassphrase) {
   if (memcmp(lVerify.data(), sVerifyToken, strlen(sVerifyToken)) != 0)
     throw std::runtime_error("wrong passphrase");
 
-  sensitive_t<u256> lPrivK;
-  SOPHIA_CCALL(crypto_secretbox_open_detached(lPrivK->data(), lSKCrypt.data(), lSKMac.data(), lSKCrypt.size(),
+  sensitive_t<u512> lEventSK;
+  SOPHIA_CCALL(crypto_secretbox_open_detached(lEventSK->data(), lSKCrypt.data(), lSKMac.data(), lSKCrypt.size(),
                                               lSKNonce.data(), secretKey->data()));
 
-  u256 lHashPubK;
-  sensitive_t<u512> lHashPrivK;
-  static_assert(lHashPubK.size() == crypto_sign_PUBLICKEYBYTES);
-  assert(lHashPrivK->size() == crypto_sign_SECRETKEYBYTES);
-  assert(lPrivK->size() == crypto_sign_SEEDBYTES);
-  SOPHIA_CCALL(crypto_sign_seed_keypair(lHashPubK.data(), lHashPrivK->data(), lPrivK->data()));
+  u256 lMsgPK;
+  sensitive_t<u256> lMsgSK;
+  static_assert(lMsgPK.size() == crypto_box_PUBLICKEYBYTES);
+  assert(lMsgSK->size() == crypto_box_SECRETKEYBYTES);
+  SOPHIA_CCALL(crypto_sign_ed25519_pk_to_curve25519(lMsgPK.data(), lEventPK.data()));
+  SOPHIA_CCALL(crypto_sign_ed25519_sk_to_curve25519(lMsgSK->data(), lEventSK->data()));
 
-  return {lPubK, lPrivK, lHashPubK, lHashPrivK};
+  return {lEventPK, lEventSK, lMsgPK, lMsgSK};
 }
 
 int32_t Database::getRevision(const u8 *pID) {

@@ -130,11 +130,11 @@ template <typename T> struct sensitive_t {
 using passphrase_t = sensitive_t<std::string>;
 
 struct keypairs_t {
-  u256 publicKey;
-  sensitive_t<u256> privateKey;
+  u256 eventPK;
+  sensitive_t<u512> eventSK;
 
-  u256 hashPublicKey;
-  sensitive_t<u512> hashPrivateKey;
+  u256 msgPK;
+  sensitive_t<u256> msgSK;
 };
 
 template <typename T> T rand() {

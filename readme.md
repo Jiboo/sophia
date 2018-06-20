@@ -87,6 +87,11 @@ Maximum message size is:
 
 With "values" of 1024B maximum, this leaves 132B for metadata.
 
+Each nodes uses two sets of keypairs:
+- "event-keypair": a keypair generated through `crypto_sign`,
+- "msg-keypair": derived from the event-keypair using
+  `crypto_sign_ed25519_*_to_curve25519` that will be used for `crypto_box`.
+
 Values
 ------
 
@@ -305,9 +310,6 @@ To avoid NAT hell, topic sub-overlays uses the same id&ip&port,
             u256 topic_id
             u256 source_id
             u512 event_signature
-                u192 signature_nonce
-                u128 signature_mac
-                u192 crypted_hash
             u8 height
             u8 event_type
             u16 event_extra     (total event_header is 132 bytes)
@@ -328,21 +330,8 @@ Events can't be anonymous, nodes seeing an `height` of 0 would know that
 source and a signature so that other nodes may verify that the event wasn't
 tempered with.
 
-Events can't be signed like values (generating an ephemeral `crypto_sign`
-keypair to get a unique event_id/pk and signature) as it would be a waste.
-We can't use the `crypto_box` keypair of node's IDs for the `crypto_sign` API,
-we also don't have enough space to specify the source-ID and another PK for
-`crypto_sign`.
-
-We could have derived `crypto_box` keypairs from a master `crypto_sign` one,
-although it seems unrecommended... 
-We use a unorthodox way to sign the event. We first use `crypto_hash` to
-generate a 192B hash of all the fields expect `height` & `event_signature`.
-We then use `crypto_box` to encrypt this hash with a random `signature_nonce`.
-
-To verify the signature of an event, nodes should compute the hash on the same
-fields, decrypt the contents of `crypted_hash` using `source_id` as PK, and
-should find the same value for the hash.
+Events are signed using the "event-keypair" the node-ID/PK of the source can be
+derived using `crypto_sign_ed25519_pk_to_curve25519`.
 
 Security
 --------
@@ -405,5 +394,6 @@ to:
 - blacklist an ID
 - get and put to DHT
 - join, leave, listen and push events to pubsub topics
+- unicast an event to a specific target
 - sodium crypto
 - zlib compression
