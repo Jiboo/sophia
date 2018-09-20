@@ -1,43 +1,17 @@
 #include <gtest/gtest.h>
 
-#define SOPHIA_EXTRA_API
-#include "Node.hpp"
+#include "Network.hpp"
 
 using namespace sophia;
 
-class PubsubTest : public ::testing::Test {
-protected:
-  void SetUp() override {
-    passphrase = passphrase_t("test");
-    constexpr size_t lNodesCount = 100;
-    for (size_t i = 0; i < lNodesCount; i++) {
-      std::string lDbName = "file:memdb" + std::to_string(i) + "?mode=memory";
-      nodes.emplace_back(
-          std::make_unique<Node>(service, lDbName.c_str(), passphrase,
-                                 net::ip::udp::endpoint(boost::asio::ip::address::from_string("::1"), 0)));
-      if (i > 0)
-        nodes[i]->bootstrap(nodes[0]->self(), []() {});
-      service.run_for(std::chrono::milliseconds(20));
-    }
-  }
-
-  net::io_service service;
-  passphrase_t passphrase;
-  std::vector<std::unique_ptr<Node>> nodes;
+class PubsubTest : public SophiaNetworkTest {
 };
 
 TEST_F(PubsubTest, Join) {
-  u256 lTopicID = nodes[0]->createTopic(
-      [this]() {
-        // std::cout << "node 0, " << nodes[0]->self() << " joined " << std::endl;
-        // nodes[0]->topicRoutingTable(lTopicID).debug();
-      },
-      [](const Event &pEvent) {
+  u256 lTopicID = nodes[0]->createTopic([] {}, [](const Event &pEvent) {});
+  process();
 
-      });
-  service.run_for(std::chrono::milliseconds(20));
-
-  const size_t lSubs = nodes.size() / 10;
+  const size_t lSubs = SOPHIA_K;
   for (size_t i = 1; i <= lSubs; i++) {
     // std::cout << "node " << i << ", " << nodes[i]->self() << " trying to join..." << std::endl;
     nodes[i]->subscribe(lTopicID,
@@ -47,14 +21,95 @@ TEST_F(PubsubTest, Join) {
                           EXPECT_EQ(i, nodes[i]->topicRoutingTable(lTopicID).countNodes());
                         },
                         [](const Event &pEvent) {});
-    service.run_for(std::chrono::milliseconds(20));
+    process();
   }
 }
 
 TEST_F(PubsubTest, ClosestNodes) {
-  // TODO
+  u256 lTopicID = nodes[0]->createTopic([] {}, [](const Event &pEvent) {});
+  process();
+
+  const size_t lSubs = nodes.size() - 1;
+  for (size_t i = 1; i <= lSubs; i++) {
+    nodes[i]->subscribe(lTopicID, []() {}, [](const Event &pEvent) {});
+    process();
+  }
+
+  for (size_t i = 0; i <= lSubs / 10; i++) {
+    // std::cout << "refreshing node " << i << ", " << nodes[i]->self() << std::endl;
+    nodes[i]->refreshTopic(lTopicID);
+    process();
+    // nodes[i]->topicRoutingTable(lTopicID).debug();
+  }
+
+  const size_t lTests = lSubs / 10;
+  for (size_t i = 0; i < lTests; i++) {
+    size_t lSourceIndex = randombytes_uniform(lSubs);
+    size_t lRefIndex;
+    do {
+      lRefIndex = randombytes_uniform(lSubs);
+    } while (lRefIndex == lSourceIndex);
+    u256 lRef = nodes[lRefIndex]->self().id;
+    nodes[lSourceIndex]->pubsubClosestNodes(
+        lTopicID, lRef, [lRef](const std::vector<Contact> &pResult) { ASSERT_EQ(lRef, pResult[0].id); });
+    process();
+  }
 }
 
 TEST_F(PubsubTest, Broadcast) {
-  // TODO
+  size_t lHandled = 0;
+
+  u256 lTopicID = nodes[0]->createTopic(
+      [/*this*/]() {
+        // std::cout << "node 0, " << nodes[0]->self() << " joined " << std::endl;
+        // nodes[0]->topicRoutingTable(lTopicID).debug();
+      },
+      [&lHandled /*, this*/](const Event &pEvent) {
+        lHandled++;
+        // std::cout << "node 0, " << nodes[0]->self() << " got event " << cbuff_view_t{pEvent.signature.data(), 4} <<
+        // std::endl;
+      });
+  process();
+
+  const size_t lSubs = nodes.size() - 1;
+  for (size_t i = 1; i <= lSubs; i++) {
+    nodes[i]->subscribe(lTopicID,
+                        [/*this, i, lTopicID*/]() {
+                          // std::cout << "node " << i << ", " << nodes[i]->self() << " joined " << lTopicID <<
+                          // std::endl;
+                        },
+                        [/*this, i,*/ &lHandled](const Event &pEvent) {
+                          lHandled++;
+                          // std::cout << "node " << i << ", " << nodes[i]->self() << " got event " <<
+                          // cbuff_view_t{pEvent.signature.data(), 4} << std::endl;
+                        });
+    process();
+  }
+
+  for (size_t i = 0; i <= lSubs / 10; i++) {
+    //std::cout << "refreshing node " << i << ", " << nodes[i]->self() << std::endl;
+    nodes[i]->refreshTopic(lTopicID);
+    process();
+    // nodes[i]->topicRoutingTable(lTopicID).debug();
+  }
+
+  float lTotalCover = 0;
+  const size_t lTests = lSubs / 10;
+  for (size_t i = 0; i < lTests; i++) {
+    lHandled = 0;
+    Node::sSentEvent = 0;
+    size_t lSourceIndex = randombytes_uniform(lSubs);
+    std::vector<uint8_t> lData;
+    lData.resize(1024);
+    randombytes_buf(lData.data(), lData.size());
+    auto lStart = Clock::now();
+    nodes[lSourceIndex]->publish(lTopicID, 0, 0, cbuff_view_t{lData.data(), lData.size()});
+    process();
+    float lCover = lHandled / float(lSubs);
+    lTotalCover += lCover;
+    auto lDelay = Node::sLastRecvEvent - lStart;
+    std::cout << (lCover * 100) << "% nodes received event in " << Node::sSentEvent << " messages in "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(lDelay).count() << "ms" << std::endl;
+  }
+  ASSERT_GE(lTotalCover / lTests, 0.9);
 }

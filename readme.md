@@ -6,14 +6,16 @@ Todo
 ----
 
 - [x] Kademlia prototype
-- [ ] Publish/subscribe prototype
-- [ ] Remove 4b to msg_type & value_type, add 4b to cmd_token & value_revision
+- [x] Publish/subscribe prototype
+- [ ] Delete error message, store and pubsub_event shouldn't emit any reply
 - [ ] Finish network impl (error codes, kademlia republish/pings, security..)
 - [ ] Clean Node code, much room for code factorisation
 - [ ] More network unit tests
 - [ ] VM (based on https://github.com/Jiboo/wembed)
 - [ ] VM API
+- [ ] RPC message, similar to pubsub_event, replace source-id with contract-id (recipient derivate node-id to validate signature)
 - [ ] DApps samples
+    - [ ] Torrent like swarm, based on topic pubsub of bitfields and rpc for data
 
 Rationale
 ---------
@@ -113,7 +115,7 @@ has a `crypto_sign` keypair, the public-key is its ID, and the private-key is
 required to push new revisions (with a valid signature). The signature is
 on a concatenation of all fields except `value_signature`.
 
-To create immutable values, just make `value_revision = 0xFFFFFF`.
+To create immutable signed values, just make `value_revision = 0xFFFFFF`.
 
     value_type 0x00: unspecified/blob
         blob (up to 1024B)
@@ -223,6 +225,10 @@ local store and if the `value_signature` is valid.
             u32 code
                 0x0: no error
                 0x1: unspecified error
+                0x2: illformed
+                
+                // Errors for `ping`
+                0x1000: MTU too low
 
                 // Errors for `store`
                 0x1300: local store full
@@ -279,15 +285,13 @@ nodes wanting to subscribe may bootstrap.
             u256 topic_id
 
 Upon receiving a `pubsub_join`, hosts reply with a `pubsub_nodes_result` of
-nodes currently in the topic specific routing-table. Hosts uses the
-`pubsub_join/left` messages to maintain a small list of nodes to bootstrap to.
-Hosts should remove from the list nodes that don't reply to `pubsub_ping`.
+nodes currently in the topic specific routing-table closer to the node-id of
+the new subscriber.
+`pubsub_join` may also be used by hosts to subscribers, as a way to ping them.
 
-Subscribed nodes reply to `pubsub_ping` with a `pubsub_nodes_result` closest to
-the node of the ping recipient.
-
-Hosts receiving an unknown `topic_bootstrap` to store, should add the sender
-as the first node in the associated bootstrap list.
+Hosts receiving an unknown `topic_bootstrap` value to store, should initialize
+their routing table for that topic, and add the sender as the first node in the
+associated bootstrap list.
 
     msg_type 0x31: pubsub_closest_nodes
         payload:
@@ -301,7 +305,6 @@ as the first node in the associated bootstrap list.
                 u128 ipv6
                 u16 port
 
-To avoid NAT hell, topic sub-overlays uses the same id&ip&port,
 `pubsub_closest_nodes` behaves like `closest_nodes` it just have an extra
 `topic_id` to target a specific routing table.
 
@@ -322,16 +325,14 @@ incidence in the routing.
 `height` is used by the dispatching algorithm to spread events deeper and deeper
 in the tree, as described by the multicast algorithm. Upon receiving a
 `pubsub_event`, a node will iterate over it's topic specific routing-table
-buckets from `height` to 256, will select `k_topic` random nodes from each
-buckets and forward the event with an `height` incremented.
+buckets from `height` to 256, will select `event_replication` random nodes from
+each buckets and forward them the event with an `height` incremented.
 
 Events can't be anonymous, nodes seeing an `height` of 0 would know that
 `msg_src` created it. So, as it may be useful to some contracts, we add the
 source and a signature so that other nodes may verify that the event wasn't
-tempered with.
-
-Events are signed using the "event-keypair" the node-ID/PK of the source can be
-derived using `crypto_sign_ed25519_pk_to_curve25519`.
+tempered with. Fields `event_signature` and `height` shouldn't be used to
+compute the signature of the event.
 
 Security
 --------

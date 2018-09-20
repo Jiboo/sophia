@@ -47,7 +47,7 @@ u8 Table::closestNodes(const u256 &pTarget, Contact *pArray, u8 pMax, const u256
     auto &lBucket = buckets[lBucketID];
 
     std::partial_sort_copy(lBucket.begin(), lBucket.end(), lBuff.begin(), lBuff.end(),
-                           [this, &pTarget](const Entry &pLeft, const Entry &pRight) {
+                           [&pTarget](const Entry &pLeft, const Entry &pRight) {
                              return closerDist256(pTarget.data(), pLeft.contact.id.data(), pRight.contact.id.data()) <
                                     0;
                            });
@@ -74,6 +74,20 @@ u8 Table::closestNodes(const u256 &pTarget, Contact *pArray, u8 pMax, const u256
     lBucketID--;
   }
   return lCount;
+}
+
+const Entry *Table::randomNodeInKBucket(u8 pBucket) const {
+  auto lNonEmpty = firstNonEmptyBucket();
+  if (lNonEmpty == -1)
+    return nullptr; // All buckets are empty
+
+  auto lBucketID = std::max(int(lNonEmpty), int(pBucket));
+  if (lBucketID >= buckets.size())
+    return nullptr;
+
+  auto &lBucket = buckets[lBucketID];
+
+  return &lBucket.contacts[randombytes_uniform(lBucket.size())];
 }
 
 Entry *Table::mayAddNewContact(const Contact &pContact) {
@@ -114,7 +128,7 @@ void Table::addRTT(const Contact &pContact, float pTime) {
   }
 }
 
-int Table::firstNonEmptyBucket() {
+int Table::firstNonEmptyBucket() const {
   int lResult = -1;
   for (int lIndex = 0; lIndex < int(buckets.size()); lIndex++) {
     if (!buckets[lIndex].empty()) {

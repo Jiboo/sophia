@@ -5,7 +5,7 @@ int main(int argc, char **argv) {
   passphrase_t lPassphrase("test");
 
   net::io_service lService;
-  size_t lNodesCount = 4000; // std::stoul(argv[1]);
+  size_t lNodesCount = 400; // std::stoul(argv[1]);
 
   std::unique_ptr<Node> lNodes[lNodesCount];
 
@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
     if (i > 0)
       lNodes[i]->bootstrap(lNodes[0]->self(), []() {});
 
-    lService.run_for(std::chrono::milliseconds(20));
+    lService.run_for(std::chrono::milliseconds(250));
   }
 
   std::cout << "[TST] Initialized " << lNodesCount << " nodes in " << dur_t{Clock::now() - lInitStart} << std::endl;
@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
   }*/
 
   Value lTemp;
-  for (size_t lValIndex = 0; lValIndex < lNodesCount * 10; lValIndex++) {
+  for (size_t lValIndex = 0; lValIndex < lNodesCount * 72; lValIndex++) {
     randValue(lTemp);
 
     // std::cout << "[TST] Generated value " << lTemp.id.view() << std::endl;
@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
         }
       });
     });
-    lService.run_for(std::chrono::milliseconds(20));
+    lService.run_for(std::chrono::milliseconds(250));
   }
 
   /*u256 lTopicID = lNodes[0]->createTopic([](const Event &pEvent){

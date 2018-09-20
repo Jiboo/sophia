@@ -13,13 +13,13 @@ include(GoogleTest)
 
 include_directories(inc)
 
-add_definitions(-DSOPHIA_PWHASH_FAST)
+add_definitions(-DSOPHIA_PWHASH_FAST -DSOPHIA_EXTRA_API)
 
 file(GLOB_RECURSE SOPHIA_INC "inc/**.hpp")
 file(GLOB_RECURSE SOPHIA_SRC "src/**.cpp")
-file(GLOB_RECURSE SOPHIA_GTESTS "tst/gtests/**.cpp")
-#file(GLOB_RECURSE SOPHIA_GTESTS "tst/gtests/pubsub.cpp")
-#file(GLOB_RECURSE SOPHIA_GTESTS "tst/gtests/kademlia.cpp")
+file(GLOB_RECURSE SOPHIA_GTESTS_INC "tst/gtests/**.hpp")
+file(GLOB_RECURSE SOPHIA_GTESTS_SRC "tst/gtests/**.cpp")
+#file(GLOB_RECURSE SOPHIA_GTESTS_SRC "tst/gtests/pubsub.cpp" "tst/gtests/Network.cpp")
 
 add_library(sophia ${SOPHIA_INC} ${SOPHIA_SRC})
 target_link_libraries(sophia
@@ -33,6 +33,6 @@ target_link_libraries(sophia-cli sophia miniupnpc)
 add_executable(sophia-tst-net tst/network.cpp)
 target_link_libraries(sophia-tst-net sophia)
 
-add_executable(sophia-gtests ${SOPHIA_GTESTS})
+add_executable(sophia-gtests ${SOPHIA_GTESTS_INC} ${SOPHIA_GTESTS_SRC})
 target_link_libraries(sophia-gtests sophia gtest gtest_main)
 gtest_add_tests(TARGET sophia-gtests AUTO)

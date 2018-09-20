@@ -18,7 +18,7 @@ struct Value {
   std::vector<u8> data;
 
   void read(cbuff_view_t &pSource);
-  void write(buff_view_t &pDest, bool pWithSign = true) const;
+  void write(buff_view_t &pDest, bool pForSign = true) const;
 
   size_t serializedSize() const;
   u512 computeSignature(const sensitive_t<u512> &pKey) const;
@@ -38,7 +38,7 @@ struct Event {
   std::vector<u8> data;
 
   void read(cbuff_view_t &pSource);
-  void write(buff_view_t &pDest, bool pWithSign = true) const;
+  void write(buff_view_t &pDest, bool pForSign = true) const;
 
   size_t serializedSize() const;
   u512 computeSignature(const sensitive_t<u512> &pKey) const;

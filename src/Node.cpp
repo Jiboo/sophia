@@ -7,8 +7,14 @@ using namespace sophia;
 constexpr auto sMaxClosestNodes = 20; // Could push up to 23 without going over 1280 bytes, but dunno if its worth
 
 constexpr bool sDebugIterativeClosestNodes = false;
+constexpr bool sDebugIterativePubsubClosestNodes = false;
 
 const char *SophiaErrorCategory::name() const noexcept { return "sophia protocol error"; }
+
+#ifdef SOPHIA_EXTRA_API
+uint64_t Node::sSentEvent = 0;
+Clock::time_point Node::sLastRecvEvent;
+#endif
 
 std::string SophiaErrorCategory::message(int ev) const {
   switch ((SophiaErrorCode)ev) {
@@ -16,6 +22,10 @@ std::string SophiaErrorCategory::message(int ev) const {
     return "0x0: eNoError";
   case SophiaErrorCode::eUnspecified:
     return "0x1: eUnspecified";
+  case SophiaErrorCode::eIllformed:
+    return "0x2: eIllformed";
+  case SophiaErrorCode::eMTUTooLow:
+    return "0x1000: eMTUTooLow";
   case SophiaErrorCode::eLocalStoreFull:
     return "0x1300: eLocalStoreFull";
   case SophiaErrorCode::eKeyAlreadyAssigned:
@@ -34,6 +44,8 @@ const SophiaErrorCategory &SophiaErrorCategory::instance() {
   static SophiaErrorCategory sCategory;
   return sCategory;
 }
+
+ErrorCode SophiaErrorCategory::wrap(SophiaErrorCode pCode) { return ErrorCode((int)pCode, instance()); }
 
 inflight_t::inflight_t(net::io_service &pService, Contact pDest, const u256 &pID, Callback pCallback)
     : timeout(pService, SOPHIA_TIMEOUT), id(pID), dest(std::move(pDest)), callback(std::move(pCallback)) {}
@@ -87,7 +99,6 @@ void Node::IterativeClosestNodesFunctor::operator()(ErrorCode pError, const Cont
           if (lCloser < 0) {
             if constexpr (sDebugIterativeClosestNodes)
               std::cout << "Got a closest nodes than searched: " << pResults[lClosest] << std::endl;
-
             context->inflight.push_back(pResults[lClosest]);
             node->sendClosestNodes(pResults[lClosest], context->key, *this);
             break;
@@ -131,11 +142,27 @@ void Node::IterativePubsubClosestNodesFunctor::operator()(ErrorCode pError, cons
         lClosest = i;
     }
 
+    if constexpr (sDebugIterativePubsubClosestNodes) {
+      std::cout << "Status for iterative on: " << node->self() << " done " << context->searched.size() << " steps in "
+                << dur_t{Clock::now() - context->start} << std::endl;
+      for (auto &lInflight : context->inflight)
+        std::cout << "\tI: " << lInflight << std::endl;
+      for (auto &lSearched : context->searched)
+        std::cout << "\tS: " << lSearched << std::endl;
+      for (auto &lResponse : pResults)
+        std::cout << "\tR: " << lResponse << std::endl;
+      std::cout << "Best " << pResults[lClosest] << ", known? " << context->isKnown(pResults[lClosest]) << std::endl;
+    }
+
     if (!context->isKnown(pResults[lClosest])) {
+      if constexpr (sDebugIterativePubsubClosestNodes)
+        std::cout << "Looking for a better node than inflight.." << std::endl;
       bool found = false;
       for (auto it = context->inflight.begin(); it != context->inflight.end(); it++) {
         auto lCloser = closerDist256(context->key.data(), pResults[lClosest].id.data(), it->id.data());
         if (lCloser < 0) {
+          if constexpr (sDebugIterativePubsubClosestNodes)
+            std::cout << "Got a closest nodes than inflight: " << pResults[lClosest] << std::endl;
           context->inflight.push_back(pResults[lClosest]);
           node->sendPubsubClosestNodes(pResults[lClosest], context->topic, context->key, *this);
           found = true;
@@ -143,9 +170,13 @@ void Node::IterativePubsubClosestNodesFunctor::operator()(ErrorCode pError, cons
         }
       }
       if (!found) {
+        if constexpr (sDebugIterativePubsubClosestNodes)
+          std::cout << "Looking for a better node than history.." << std::endl;
         for (const auto &lSearched : context->searched) {
           auto lCloser = closerDist256(context->key.data(), pResults[lClosest].id.data(), lSearched.id.data());
           if (lCloser < 0) {
+            if constexpr (sDebugIterativePubsubClosestNodes)
+              std::cout << "Got a closest nodes than searched: " << pResults[lClosest] << std::endl;
             context->inflight.push_back(pResults[lClosest]);
             node->sendPubsubClosestNodes(pResults[lClosest], context->topic, context->key, *this);
             break;
@@ -156,6 +187,9 @@ void Node::IterativePubsubClosestNodesFunctor::operator()(ErrorCode pError, cons
   }
 
   if (context->inflight.empty()) {
+    if constexpr (sDebugIterativePubsubClosestNodes)
+      std::cout << node->self() << " Got all responses after " << context->searched.size() << " steps in "
+                << dur_t{Clock::now() - context->start} << std::endl;
     auto lResults = context->searched;
     for (const auto &lContact : pResults) {
       if (std::find(lResults.begin(), lResults.end(), lContact) == lResults.end()) {
@@ -290,8 +324,11 @@ void Node::recieve() {
                                 case ePubsubJoin:
                                   replyPubsubJoin(lSource, lBuff);
                                   break;
+                                case ePubsubClosestNodes:
+                                  replyPubsubClosestNodes(lSource, lBuff);
+                                  break;
                                 case ePubsubEvent:
-                                  forwardPubsubEvent(lSource, lBuff);
+                                  handlePubsubEvent(lSource, lBuff);
                                   break;
 
                                 case eNodesResult:
@@ -303,6 +340,7 @@ void Node::recieve() {
                                   break;
                                 default:
                                   std::cout << "[NET] unexpected command identifier" << std::endl;
+                                  replyWithError(lSource, lBuff.data, SophiaErrorCode::eIllformed);
                                 }
                               } else {
                                 std::cout << "[NET] Error while opening message, ignoring." << std::endl;
@@ -313,7 +351,7 @@ void Node::recieve() {
 }
 
 size_t Node::prepareCommand(const Contact &pDest, const u256 &pID, MessageType pCommandType, u8 *pBuffer,
-                            const inflight_t::Callback &pCallback) {
+                            const inflight_t::Callback &pCallback = {}) {
   uint32_t lToken;
   size_t lID;
   do {
@@ -323,20 +361,22 @@ size_t Node::prepareCommand(const Contact &pDest, const u256 &pID, MessageType p
 
   inflight_t lInflight{service, pDest, pID, pCallback};
 
-  lInflight.timeout.async_wait([this, lID, lToken](const ErrorCode &pError) {
-    auto lRef = inflights.find(lID);
-    if (pError != boost::asio::error::operation_aborted && lRef != inflights.end()) {
-      auto lEntry = routing.findEntry(lRef->second.dest.id);
-      std::cout << "[NET] Inflight timeout " << self() << ", to " << lRef->second.dest << ", token: " << std::hex
-                << (htonl(lToken) >> 8) << ", " << lID << std::dec << ", has entry: " << (lEntry != nullptr)
-                << std::endl;
-      if (lEntry != nullptr) {
-        lEntry->sentCommands++;
+  if (pCallback) {
+    lInflight.timeout.async_wait([this, lID, lToken](const ErrorCode &pError) {
+      auto lRef = inflights.find(lID);
+      if (pError != boost::asio::error::operation_aborted && lRef != inflights.end()) {
+        auto lEntry = routing.findEntry(lRef->second.dest.id);
+        std::cout << "[NET] Inflight timeout " << self() << ", to " << lRef->second.dest << ", token: " << std::hex
+                  << (htonl(lToken) >> 8) << ", " << lID << std::dec << ", has entry: " << (lEntry != nullptr)
+                  << std::endl;
+        if (lEntry != nullptr) {
+          lEntry->sentCommands++;
+        }
+        lRef->second.callback(boost::asio::error::timed_out, lRef->second.dest, lRef->second.id, {nullptr, 0});
+        inflights.erase(lRef);
       }
-      lRef->second.callback(boost::asio::error::timed_out, lRef->second.dest, lRef->second.id, {nullptr, 0});
-      inflights.erase(lRef);
-    }
-  });
+    });
+  }
 
   pBuffer[0] = (u8)pCommandType;
   memcpy(pBuffer + 1, &lToken, 3);
@@ -383,8 +423,9 @@ void Node::recvResponse(const Contact &pSource, const cbuff_view_t &pBuff) {
     assert(pBuff.size == 8);
     const auto *lErrorPtr = reinterpret_cast<const uint32_t *>(pBuff.data + 4);
     uint32_t lError = ntohl(*lErrorPtr);
-    lInflight->second.callback(ErrorCode(lError, SophiaErrorCategory::instance()), pSource, lInflight->second.id,
-                               pBuff);
+    if (lInflight->second.callback)
+      lInflight->second.callback(ErrorCode(lError, SophiaErrorCategory::instance()), pSource, lInflight->second.id,
+                                 pBuff);
   }
 
   inflights.erase(lInflight);
@@ -406,15 +447,19 @@ size_t Node::sendPing(const Contact &pDest, const Node::PingCallback &pCallback)
       return;
     }
 
-    if (pBuff.data[0] != ePong)
+    if (pBuff.data[0] != ePong) {
+      pCallback(sNoError, pSource);
       return;
+    }
 
     if (pBuff.size != 1156 + 4) {
-      // TODO Reply with an error
+      // TODO MTU Too low, should blackslist that node
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource);
       return;
     }
     if (memcmp(pBuff.data + 4, lRand.data(), 1156) != 0) {
-      // TODO Reply with an error
+      // TODO Corrupted, should blackslist that node
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource);
       return;
     }
 
@@ -436,7 +481,7 @@ void Node::replyPing(const Contact &pSource, const cbuff_view_t &pBuff) {
   prepareReply(pSource, ePong, pBuff.data, lReply);
 
   if (pBuff.size != sizeof(lReply)) {
-    // TODO Reply with an error
+    replyWithError(pSource, pBuff.data, SophiaErrorCode::eMTUTooLow);
     return;
   }
 
@@ -455,18 +500,23 @@ size_t Node::sendClosestNodes(const Contact &pDest, const u256 &pKey, const Node
       return;
     }
 
-    if (pBuff.data[0] != eNodesResult)
+    if (pBuff.data[0] != eNodesResult) {
+      // TODO Blacklist
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {});
       return;
-    // TODO Blacklist?
+    }
 
     u8 lCount = pBuff.data[4];
     if (lCount > sMaxClosestNodes) {
-      std::cout << "[NET] Incorrect count in nodes result" << std::endl;
+      // TODO Blacklist
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {});
+      return;
     }
     std::vector<Contact> lResult(lCount);
     size_t lContactsBuffSize = sEntrySize * lCount;
     if (lContactsBuffSize != pBuff.size - 5) {
-      // TODO pCallback(malformed error, pSource, {});
+      // TODO Blacklist
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {});
       return;
     }
     cbuff_view_t lContactsBuff{pBuff.data + 5, lContactsBuffSize};
@@ -486,6 +536,10 @@ size_t Node::sendClosestNodes(const Contact &pDest, const u256 &pKey, const Node
 
 void Node::replyClosestNodes(const Contact &pSource, const cbuff_view_t &pBuff) {
   u256 lID;
+  if (pBuff.size != lID.size() + 4) {
+    // TODO Blacklist
+    return;
+  }
   memcpy(lID.data(), pBuff.data + 4, lID.size());
   std::array<Contact, sMaxClosestNodes> lContacts;
   u8 lCount = routing.closestNodes(lID, lContacts.data(), lContacts.size(), &pSource.id);
@@ -528,11 +582,15 @@ size_t Node::sendFindValue(const Contact &pDest, const u256 &pKey, const Node::F
       u8 lCount = pBuff.data[4];
       if (lCount > sMaxClosestNodes) {
         std::cout << "[NET] Incorrect count in nodes result" << std::endl;
+        pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {}, {});
+        // TODO Blacklist
+        return;
       }
       std::vector<Contact> lResult(lCount);
       size_t lContactsBuffSize = sEntrySize * lCount;
       if (lContactsBuffSize != pBuff.size - 5) {
-        // TODO pCallback(malformed error, pSource, {});
+        pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {}, {});
+        // TODO Blacklist
         return;
       }
       cbuff_view_t lContactsBuff{pBuff.data + 5, lContactsBuffSize};
@@ -548,6 +606,9 @@ size_t Node::sendFindValue(const Contact &pDest, const u256 &pKey, const Node::F
       lResult.read(lValueBuff);
       if (pCallback)
         pCallback(sNoError, pSource, {}, lResult);
+    } else {
+      // TODO Blacklist
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {}, {});
     }
   };
 
@@ -560,8 +621,12 @@ size_t Node::sendFindValue(const Contact &pDest, const u256 &pKey, const Node::F
 }
 
 void Node::replyFindValue(const Contact &pSource, const cbuff_view_t &pBuff) {
-  auto lValue = db.loadValue(pBuff.data + 4);
+  if (pBuff.size < (32 + 4)) {
+    // TODO Blacklist
+    return;
+  }
 
+  auto lValue = db.loadValue(pBuff.data + 4);
   if (!lValue) {
     replyClosestNodes(pSource, pBuff);
   } else {
@@ -605,6 +670,11 @@ size_t Node::sendStore(const Contact &pDest, const Value &pValue, const Node::St
 void Node::replyStore(const Contact &pSource, const cbuff_view_t &pBuff) {
   auto lErrorCode = (uint32_t)SophiaErrorCode::eNoError;
 
+  if (pBuff.size < 132 + 4) {
+    // TODO Blacklist
+    return;
+  }
+
   cbuff_view_t lReadBuff = pBuff;
   lReadBuff.seek(4);
   Value lValue;
@@ -636,24 +706,31 @@ size_t Node::sendPubsubJoin(const Contact &pDest, const u256 &pTopicID, const No
       return;
     }
 
-    if (pBuff.data[0] != ePubsubNodesResult)
+    if (pBuff.data[0] != ePubsubNodesResult) {
+      // TODO Blacklist?
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {});
       return;
-    // TODO Blacklist?
+    }
 
     u8 lCount = pBuff.data[4];
     if (lCount > sMaxClosestNodes) {
-      std::cout << "[NET] Incorrect count in nodes result" << std::endl;
+      // TODO Blacklist?
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {});
+      return;
     }
     std::vector<Contact> lResult(lCount);
     size_t lContactsBuffSize = sEntrySize * lCount;
     if (lContactsBuffSize != pBuff.size - 5) {
-      // TODO pCallback(malformed error, pSource, {});
+      // TODO Blacklist?
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {});
       return;
     }
     cbuff_view_t lContactsBuff{pBuff.data + 5, lContactsBuffSize};
     auto lTopicContext = topics.find(pTopicID);
-    if (lTopicContext == topics.end())
+    if (lTopicContext == topics.end()) {
       return;
+    }
+
     for (u8 i = 0; i < lCount; i++) {
       lResult[i].read(lContactsBuff);
       lTopicContext->second.routing.mayAddNewContact(lResult[i]);
@@ -674,6 +751,11 @@ size_t Node::sendPubsubJoin(const Contact &pDest, const u256 &pTopicID, const No
 
 void Node::replyPubsubJoin(const Contact &pSource, const cbuff_view_t &pBuff) {
   u256 lID;
+  if (pBuff.size != (lID.size() + 4)) {
+    // TODO Blacklist
+    return;
+  }
+
   memcpy(lID.data(), pBuff.data + 4, lID.size());
   std::array<Contact, sMaxClosestNodes> lContacts;
 
@@ -684,51 +766,51 @@ void Node::replyPubsubJoin(const Contact &pSource, const cbuff_view_t &pBuff) {
     return;
   }
 
-  u8 lCount = lTopicContext->second.routing.closestNodes(lID, lContacts.data(), lContacts.size(), &pSource.id);
+  u8 lCount = lTopicContext->second.routing.closestNodes(pSource.id, lContacts.data(), lContacts.size(), &pSource.id);
   size_t lContactsBuffSize = sEntrySize * lCount;
   u8 lReply[4 + 1 + lContactsBuffSize];
   prepareReply(pSource, ePubsubNodesResult, pBuff.data, lReply);
-
   lTopicContext->second.routing.mayAddNewContact(pSource);
 
   lReply[4] = lCount;
   buff_view_t lContactsBuff{lReply + 5, lContactsBuffSize};
 
+  // std::cout << self() << " replied to " << pSource << " join with " << (int)lCount << " entries" << std::endl;
   for (size_t i = 0; i < lCount; i++) {
     lContacts[i].write(lContactsBuff);
+    // std::cout << "\t" << lContacts[i] << std::endl;
   }
   send(pSource, {lReply, sizeof(lReply)});
-
-  /*std::cout << self() << " replied to " << pSource << " join with " << lCount << " entries" << std::endl;
-  for (size_t i = 0; i < lCount; i++) {
-    std::cout << "\t" << lContacts[i] << std::endl;
-  }*/
 }
 
 size_t Node::sendPubsubClosestNodes(const Contact &pDest, const u256 &pTopic, const u256 &pKey,
                                     const Node::ClosestNodesCallback &pCallback) {
-  u8 lCommand[4 + 32];
-
   auto lCallback = [this, pCallback, pTopic](ErrorCode pError, const Contact &pSource, const u256 &pID,
                                              const cbuff_view_t &pBuff) {
     if (pError != nullptr) {
+      std::cout << pError.message() << std::endl;
       if (pCallback)
         pCallback(pError, pSource, {});
       return;
     }
 
-    if (pBuff.data[0] != ePubsubNodesResult)
+    if (pBuff.data[0] != ePubsubNodesResult) {
+      // TODO Blacklist?
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {});
       return;
-    // TODO Blacklist?
+    }
 
     u8 lCount = pBuff.data[4];
     if (lCount > sMaxClosestNodes) {
-      std::cout << "[NET] Incorrect count in nodes result" << std::endl;
+      // TODO Blacklist?
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {});
+      return;
     }
     std::vector<Contact> lResult(lCount);
     size_t lContactsBuffSize = sEntrySize * lCount;
     if (lContactsBuffSize != pBuff.size - 5) {
-      // TODO pCallback(malformed error, pSource, {});
+      // TODO Blacklist?
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource, {});
       return;
     }
     cbuff_view_t lContactsBuff{pBuff.data + 5, lContactsBuffSize};
@@ -743,6 +825,7 @@ size_t Node::sendPubsubClosestNodes(const Contact &pDest, const u256 &pTopic, co
       pCallback(sNoError, pSource, lResult);
   };
 
+  u8 lCommand[4 + 32 + 32];
   size_t lToken = prepareCommand(pDest, pKey, ePubsubClosestNodes, lCommand, lCallback);
   memcpy(lCommand + 4, pTopic.data(), 32);
   memcpy(lCommand + 36, pKey.data(), 32);
@@ -752,9 +835,14 @@ size_t Node::sendPubsubClosestNodes(const Contact &pDest, const u256 &pTopic, co
 }
 
 void Node::replyPubsubClosestNodes(const Contact &pSource, const cbuff_view_t &pBuff) {
-  u256 lTopic;
+  u256 lTopic, lID;
+
+  if (pBuff.size != (lTopic.size() + lID.size() + 4)) {
+    // TODO Blacklist
+    return;
+  }
+
   memcpy(lTopic.data(), pBuff.data + 4, lTopic.size());
-  u256 lID;
   memcpy(lID.data(), pBuff.data + 36, lID.size());
   std::array<Contact, sMaxClosestNodes> lContacts;
 
@@ -766,12 +854,16 @@ void Node::replyPubsubClosestNodes(const Contact &pSource, const cbuff_view_t &p
   size_t lContactsBuffSize = sEntrySize * lCount;
   u8 lReply[4 + 1 + lContactsBuffSize];
   prepareReply(pSource, ePubsubNodesResult, pBuff.data, lReply);
+  lTopicContext->second.routing.mayAddNewContact(pSource);
 
   lReply[4] = lCount;
   buff_view_t lContactsBuff{lReply + 5, lContactsBuffSize};
 
+  // std::cout << self() << " replied to " << pSource << " closest-nodes with " << (int)lCount << " entries" <<
+  // std::endl;
   for (size_t i = 0; i < lCount; i++) {
     lContacts[i].write(lContactsBuff);
+    // std::cout << "\t" << lContacts[i] << std::endl;
   }
   send(pSource, {lReply, sizeof(lReply)});
 }
@@ -783,42 +875,115 @@ void Node::iterativePubsubClosestNodes(const u256 &pTopic, const u256 &pKey,
     return;
 
   auto &lRouting = lTopicContext->second.routing;
-  auto lContext = new IterativePubsubContext<Node::IterativeClosestNodesCallback>(lRouting, pTopic, pKey, pCallback);
+  auto lContext = new IterativePubsubContext<Node::IterativeClosestNodesCallback>(pTopic, pKey, pCallback);
 
   size_t lCount = lRouting.closestNodes(pKey, lContext->inflight.data(), SOPHIA_ALPHA, nullptr);
   lContext->inflight.resize(lCount);
 
   for (const auto &lContact : lContext->inflight) {
+    // std::cout << self() << " sendPubsubClosestNodes " << lContact << " for " << pKey << std::endl;
     sendPubsubClosestNodes(lContact, pTopic, pKey, IterativePubsubClosestNodesFunctor{lContext, this});
   }
 }
 
-size_t Node::sendPubsubEvent(const Contact &pDest, const Event &pEvent, const Node::StoreCallback &pCallback) {
-  auto lCallback = [pCallback](ErrorCode pError, const Contact &pSource, const u256 &pID, const cbuff_view_t &pBuff) {
-    if (pError != nullptr) {
-      if (pCallback)
-        pCallback(pError, pSource);
-      return;
-    }
-
-    if (pCallback)
-      pCallback(sNoError, pSource);
-  };
-
+size_t Node::sendPubsubEvent(const Contact &pDest, const Event &pEvent) {
   size_t lSize = 4 + pEvent.serializedSize();
   u8 lCommand[lSize];
 
-  size_t lToken = prepareCommand(pDest, pDest.id, ePubsubEvent, lCommand, lCallback);
+  size_t lToken = prepareCommand(pDest, pDest.id, ePubsubEvent, lCommand);
   buff_view_t lBuff{lCommand + 4, lSize - 4};
   pEvent.write(lBuff, true);
 
+  // std::cout << "event " << cbuff_view_t{pEvent.signature.data(), 4} << " from " << self() << " to " << pDest <<
+  // std::endl;
+
+#ifdef SOPHIA_EXTRA_API
+  sSentEvent++;
+#endif
   send(pDest, {lCommand, sizeof(lCommand)});
 
   return lToken;
 }
 
-void Node::forwardPubsubEvent(const Contact &pSource, const cbuff_view_t &pBuff) {
-  // TODO
+void Node::handlePubsubEvent(const Contact &pSource, const cbuff_view_t &pBuff) {
+  if (pBuff.size < 132 + 4) {
+    // TODO Blacklist
+    return;
+  }
+
+  cbuff_view_t lReadBuff = pBuff;
+  lReadBuff.seek(4);
+  Event lEvent;
+  lEvent.read(lReadBuff);
+
+  const auto &lContext = topics.find(lEvent.topic);
+  if (lContext == topics.end())
+    return;
+
+  SophiaErrorCode lErrorCode = SophiaErrorCode::eNoError;
+
+  auto &lKnownEvents = lContext->second.knownEvents;
+  if (lKnownEvents.find(lEvent.signature) == lKnownEvents.end()) {
+    lKnownEvents.emplace(lEvent.signature);
+    if (lEvent.signatureValid()) {
+#ifdef SOPHIA_EXTRA_API
+      sLastRecvEvent = Clock::now();
+#endif
+      lContext->second.routing.mayAddNewContact(pSource);
+      Event lIncremented(lEvent);
+      lIncremented.height++;
+      broadcastPubsubEvent(lIncremented);
+      lContext->second.callback(lEvent);
+    } else {
+      lErrorCode = SophiaErrorCode::eInvalidSignature;
+    }
+  }
+
+  replyWithError(pSource, pBuff.data, lErrorCode);
+}
+
+void Node::broadcastPubsubEvent(const Event &pEvent) {
+  if (pEvent.height == 255)
+    return;
+
+  const auto &lContext = topics.find(pEvent.topic);
+  if (lContext == topics.end())
+    return;
+
+  /*std::cout << "event " << cbuff_view_t{pEvent.signature.data(), 4} << " broadcasted by " << self() << " at height "
+            << (int)pEvent.height << std::endl;*/
+
+  const auto &lRouting = lContext->second.routing;
+  if (pEvent.height == 0 && lRouting.buckets.size() == 1 && lRouting.buckets[0].size() <= SOPHIA_K) {
+    // If node in topic <= 20, as other node have on bucket only, none will broadcast as height == 1
+    // So we sent to the whole network
+    const auto &lEntries = lRouting.buckets[0].contacts;
+    for (const auto &lEntry : lEntries)
+      sendPubsubEvent(lEntry.contact, pEvent);
+  } else {
+    for (u8 bucketID = pEvent.height; bucketID < lRouting.buckets.size(); bucketID++) {
+      if (lRouting.buckets[bucketID].size() >= SOPHIA_EVENT_REPLICATION) {
+        std::unordered_set<u256, array_hasher_t<u256::sSize>> sentContacts;
+        const Entry *lEntry = nullptr;
+        for (int replication = 0; replication < SOPHIA_EVENT_REPLICATION; replication++) {
+          do {
+            lEntry = lRouting.randomNodeInKBucket(bucketID);
+          } while (lEntry != nullptr && sentContacts.find(lEntry->contact.id) != sentContacts.end());
+          if (lEntry != nullptr) {
+            sendPubsubEvent(lEntry->contact, pEvent);
+            sentContacts.emplace(lEntry->contact.id);
+          }
+        }
+        if (lEntry == nullptr)
+          break;
+      } else {
+        // If the bucket size < SOPHIA_ALPHA, we won't be able to select enough random nodes, so send to whole bucket
+        const auto &lEntries = lRouting.buckets[bucketID].contacts;
+        for (const auto &lEntry : lEntries)
+          sendPubsubEvent(lEntry.contact, pEvent);
+      }
+    }
+  }
 }
 
 Node::Node(net::io_service &pService, const char *pDBPath, const passphrase_t &pPassphrase,
@@ -838,7 +1003,7 @@ void Node::bootstrap(const Contact &pContact, const BootstrapCallback &pCallback
                    [this, pCallback](ErrorCode pError, const Contact &pSource, std::vector<Contact> pResult) {
                      if (pError != nullptr)
                        throw sophia_fatal(pError, "error while requesting closest nodes for bootstrap");
-                     iterativeClosestNodes(keypair.msgPK, [this, pCallback](std::vector<Contact> pResult) {
+                     iterativeClosestNodes(keypair.msgPK, [this, pCallback](const std::vector<Contact> &pResult) {
                        // routing.debug();
                        refreshBuckets();
                        subscribeToKnownTopics();
@@ -855,7 +1020,7 @@ void Node::put(const Value &pValue, const PutCallback &pCallback) {
     *lCount = pContacts.size();
     for (const auto &lContact : pContacts) {
       // std::cout << self() << " put " << pValue.id << " on " << lContact << std::endl;
-      sendStore(lContact, pValue, [this, pCallback, lCount](const ErrorCode pError, const Contact &pContact) {
+      sendStore(lContact, pValue, [pCallback, lCount](const ErrorCode pError, const Contact &pContact) {
         (*lCount)--;
         if (*lCount == 0) {
           if (pCallback)
@@ -911,14 +1076,47 @@ void Node::update(const u256 &pID, uint32_t pNewRevision, const cbuff_view_t &pD
 void Node::get(const u256 &pKey, const GetCallback &pCallback) { iterativeFindValue(pKey, pCallback); }
 
 void Node::refreshBuckets() {
+  // TODO Add a callback
   // debugRouteTable();
-  for (size_t i = 0; i < routing.buckets.size(); i++) {
+  for (size_t i = 0; i < routing.buckets.size() + 1; i++) {
     auto lRandID = randSuffix(keypair.msgPK.data(), i);
     assert(clzDist256(lRandID.data(), keypair.msgPK.data()) >= i);
-    iterativeClosestNodes(lRandID, [this, i](std::vector<Contact> pResult) {
+    iterativeClosestNodes(lRandID, [/*this, i*/](std::vector<Contact> pResult) {
       // if (i == routing.buckets.size() - 1) debugRouteTable();
     });
   }
+}
+
+void Node::refreshTopicBuckets(const u256 &pTopicID) {
+  // TODO Add a callback
+  auto &lRouting = topics[pTopicID].routing;
+  for (size_t i = 0; i < lRouting.buckets.size() + 1; i++) {
+    auto lRandID = randSuffix(keypair.msgPK.data(), i);
+    assert(clzDist256(lRandID.data(), keypair.msgPK.data()) >= i);
+    iterativePubsubClosestNodes(pTopicID, lRandID, [/*this, i*/](std::vector<Contact> pResult) {
+      // if (i == routing.buckets.size() - 1) debugRouteTable();
+    });
+  }
+}
+
+void Node::refreshTopic(const u256 &pTopicID) {
+  iterativeClosestNodes(pTopicID, [this, pTopicID](const std::vector<Contact> pContacts) {
+    assert(!pContacts.empty());
+    auto lCount = std::make_shared<size_t>();
+    *lCount = pContacts.size();
+    for (const auto &lContact : pContacts) {
+      sendPubsubJoin(lContact, pTopicID,
+                     [this, pTopicID, lCount](const ErrorCode pError, const Contact &pContact,
+                                              const std::vector<Contact> &pContacts) {
+                       (*lCount)--;
+                       if (*lCount == 0) {
+                         iterativePubsubClosestNodes(
+                             pTopicID, keypair.msgPK,
+                             [this, pTopicID](const std::vector<Contact> &) { refreshTopicBuckets(pTopicID); });
+                       }
+                     });
+    }
+  });
 }
 
 u256 Node::createTopic(const JoinCallback &pJoinCallback, const EventCallback &pEventCallback) {
@@ -965,13 +1163,17 @@ void Node::subscribe(const u256 &pTopicID, const JoinCallback &pJoinCallback, co
     *lCount = pContacts.size();
     for (const auto &lContact : pContacts) {
       sendPubsubJoin(lContact, pTopicID,
-                     [this, pJoinCallback, lCount](const ErrorCode pError, const Contact &pContact,
-                                                   const std::vector<Contact> &pContacts) {
+                     [this, pJoinCallback, lCount, pTopicID](const ErrorCode pError, const Contact &pContact,
+                                                             const std::vector<Contact> &pContacts) {
                        (*lCount)--;
                        // std::cout << "[NET] Topic subscribe join response, " << *lCount << " to go, " << std::endl;
                        if (*lCount == 0) {
-                         if (pJoinCallback)
-                           pJoinCallback();
+                         iterativePubsubClosestNodes(pTopicID, keypair.msgPK,
+                                                     [this, pJoinCallback, pTopicID](const std::vector<Contact> &) {
+                                                       refreshTopicBuckets(pTopicID);
+                                                       if (pJoinCallback)
+                                                         pJoinCallback();
+                                                     });
                        }
                      });
     }
@@ -993,5 +1195,8 @@ void Node::publish(const u256 &pTopicID, u8 pEventType, u16 pEventExtra, const c
   lEvent.extra = pEventExtra;
   lEvent.data.resize(pData.size);
   memcpy(lEvent.data.data(), pData.data, pData.size);
-  lEvent.computeSignature(keypair.eventSK);
+  lEvent.signature = lEvent.computeSignature(keypair.eventSK);
+
+  lContext->second.knownEvents.emplace(lEvent.signature);
+  broadcastPubsubEvent(lEvent);
 }
