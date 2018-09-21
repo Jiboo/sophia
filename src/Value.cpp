@@ -29,10 +29,12 @@ void Value::write(buff_view_t &pDest, bool pForSign) const {
   writeBuff(pDest, {data.data(), data.size()});
 }
 
-size_t Value::serializedSize() const { return 4 + id.size() + parent.size() + signature.size() + data.size(); }
+size_t Value::serializedSize(bool pForSign) const {
+  return 4 + id.size() + parent.size() + data.size() + (pForSign ? 0 : signature.size());
+}
 
 bool Value::signatureValid() const {
-  auto lSize = serializedSize() - signature.size();
+  auto lSize = serializedSize(true);
   u8 lData[lSize];
   buff_view_t lBuff{lData, lSize};
   write(lBuff, false);
@@ -45,7 +47,7 @@ bool Value::signatureValid() const {
 
 u512 Value::computeSignature(const sensitive_t<u512> &pKey) const {
   u512 lResult;
-  auto lSize = serializedSize() - signature.size();
+  auto lSize = serializedSize(true);
   u8 lData[lSize];
   buff_view_t lBuff{lData, lSize};
   write(lBuff, false);
@@ -105,11 +107,13 @@ void Event::write(buff_view_t &pDest, bool pForSign) const {
   writeBuff(pDest, {data.data(), data.size()});
 }
 
-size_t Event::serializedSize() const { return 3 + topic.size() + source.size() + signature.size() + data.size(); }
+size_t Event::serializedSize(bool pForSign) const {
+  return (pForSign ? 3 : 4) + topic.size() + source.size() + data.size() + (pForSign ? 0 : signature.size());
+}
 
 bool Event::signatureValid() const {
   assert(crypto_sign_BYTES == signature.sSize);
-  auto lSize = serializedSize() - signature.size();
+  auto lSize = serializedSize(true);
   u8 lData[lSize];
   buff_view_t lBuff{lData, lSize};
   write(lBuff, false);
@@ -123,7 +127,7 @@ bool Event::signatureValid() const {
 
 u512 Event::computeSignature(const sensitive_t<u512> &pKey) const {
   u512 lResult;
-  auto lSize = serializedSize() - signature.size();
+  auto lSize = serializedSize(true);
   u8 lData[lSize];
   buff_view_t lBuff{lData, lSize};
   write(lBuff, false);

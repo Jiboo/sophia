@@ -19,7 +19,6 @@ file(GLOB_RECURSE SOPHIA_INC "inc/**.hpp")
 file(GLOB_RECURSE SOPHIA_SRC "src/**.cpp")
 file(GLOB_RECURSE SOPHIA_GTESTS_INC "tst/gtests/**.hpp")
 file(GLOB_RECURSE SOPHIA_GTESTS_SRC "tst/gtests/**.cpp")
-#file(GLOB_RECURSE SOPHIA_GTESTS_SRC "tst/gtests/pubsub.cpp" "tst/gtests/Network.cpp")
 
 add_library(sophia ${SOPHIA_INC} ${SOPHIA_SRC})
 target_link_libraries(sophia

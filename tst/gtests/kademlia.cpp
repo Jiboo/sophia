@@ -4,8 +4,7 @@
 
 using namespace sophia;
 
-class KademliaTest : public SophiaNetworkTest {
-};
+class KademliaTest : public SophiaNetworkTest {};
 
 TEST_F(KademliaTest, Bootstrap) {
   for (auto &node : nodes) {
@@ -25,13 +24,13 @@ TEST_F(KademliaTest, Ping) {
     nodes[lSourceID]->ping(nodes[lDestID]->self(), [&lPongCount]() { lPongCount++; });
     process();
   }
-  ASSERT_EQ(lExpectedPongCount, lPongCount);
+  EXPECT_EQ(lExpectedPongCount, lPongCount);
 }
 
 TEST_F(KademliaTest, ClosestNodes) {
   for (size_t i = 1; i < nodes.size(); i++) {
     u256 lRef = nodes[randombytes_uniform(nodes.size())]->self().id;
-    nodes[i]->closestNodes(lRef, [lRef](const std::vector<Contact> &pResult) { ASSERT_EQ(lRef, pResult[0].id); });
+    nodes[i]->closestNodes(lRef, [lRef](const std::vector<Contact> &pResult) { EXPECT_EQ(lRef, pResult[0].id); });
     process();
   }
 }
@@ -55,5 +54,5 @@ TEST_F(KademliaTest, PutGet) {
     });
     process();
   }
-  ASSERT_EQ(lExpectedStoreCount, lGetCount);
+  EXPECT_EQ(lExpectedStoreCount, lGetCount);
 }

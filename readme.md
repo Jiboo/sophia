@@ -7,13 +7,10 @@ Todo
 
 - [x] Kademlia prototype
 - [x] Publish/subscribe prototype
-- [ ] Delete error message, store and pubsub_event shouldn't emit any reply
-- [ ] Finish network impl (error codes, kademlia republish/pings, security..)
+- [ ] Finish network impl (error codes, kademlia republish/pings, retries on timeout, security..)
 - [ ] Clean Node code, much room for code factorisation
 - [ ] More network unit tests
-- [ ] VM (based on https://github.com/Jiboo/wembed)
-- [ ] VM API
-- [ ] RPC message, similar to pubsub_event, replace source-id with contract-id (recipient derivate node-id to validate signature)
+- [ ] VM & API (based on https://github.com/Jiboo/wembed)
 - [ ] DApps samples
     - [ ] Torrent like swarm, based on topic pubsub of bitfields and rpc for data
 
@@ -220,7 +217,7 @@ The store command is also used to update mutable values, the recipient should
 accept the update only if `value_revision` is greater than the revision in its
 local store and if the `value_signature` is valid.
 
-    msg_type 0x00: error
+    msg_type 0x00: result
         payload:
             u32 code
                 0x0: no error
@@ -238,9 +235,15 @@ local store and if the `value_signature` is valid.
 
                 // Errors for `pubsub_ping`
                 0x3000: not registered
+                
+                // Return codes for `rpc`
+                0x4000: contract not subscribed
+                0x4001: contract internal error
+                0x4080-40ff: custom, reserved for contracts
+            
 
-As any reply, the error message will have a `token` matching the one in the
-command that generated the error.
+As any reply, the `result` message will have a `token` matching the one in the
+command that generated the result.
 
 Iterative algorithm
 -------------------
@@ -269,6 +272,10 @@ References:
 - BitTorrent's [BEP_0050](http://www.bittorrent.org/beps/bep_0050.html)
 - [Pseudo Reliable Broadcast in the Kademlia P2P System](https://pdfs.semanticscholar.org/ca86/1c4b018e17402eca4a00e0f42e110d1743dd.pdf)
 - [Enhancing the Kademlia P2P Network](https://pp.bme.hu/ee/article/download/823/442/)
+
+The publish-subscribe mechanism is used to dispatch events toward a subset of
+nodes, that are subscribed to a topic. Events are considered unreliable, and
+may take multiple seconds to reach all subscribed nodes.
 
 There is no private topics, and events aren't encrypted, although contracts may
 use available cryptographic API to encrypt events' data somehow, if they can
@@ -334,6 +341,25 @@ source and a signature so that other nodes may verify that the event wasn't
 tempered with. Fields `event_signature` and `height` shouldn't be used to
 compute the signature of the event.
 
+RPC
+---
+
+The RPC command is used for direct reliable communication between nodes.
+
+    msg_type 0x40: rpc
+        payload:
+            u256 contract_id
+            u32 rpc_param32
+            u256 rpc_param256
+            u512 rpc_param512
+            rpc_data (up to 1024B) (total rpc_header is 132 bytes)
+
+An RPC command is sent by a contract, to another node and contract specified by
+`contract_id`. All `rpc_` fields values are up to the contracts.
+
+No need for signature of data because the emitter always is the source, and
+msg_header is used for integrity and identification checks.
+
 Security
 --------
 
@@ -395,6 +421,6 @@ to:
 - blacklist an ID
 - get and put to DHT
 - join, leave, listen and push events to pubsub topics
-- unicast an event to a specific target
+- rpc on other nodes (for unicast)
 - sodium crypto
 - zlib compression

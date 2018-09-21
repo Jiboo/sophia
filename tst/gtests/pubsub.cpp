@@ -4,8 +4,7 @@
 
 using namespace sophia;
 
-class PubsubTest : public SophiaNetworkTest {
-};
+class PubsubTest : public SophiaNetworkTest {};
 
 TEST_F(PubsubTest, Join) {
   u256 lTopicID = nodes[0]->createTopic([] {}, [](const Event &pEvent) {});
@@ -51,7 +50,7 @@ TEST_F(PubsubTest, ClosestNodes) {
     } while (lRefIndex == lSourceIndex);
     u256 lRef = nodes[lRefIndex]->self().id;
     nodes[lSourceIndex]->pubsubClosestNodes(
-        lTopicID, lRef, [lRef](const std::vector<Contact> &pResult) { ASSERT_EQ(lRef, pResult[0].id); });
+        lTopicID, lRef, [lRef](const std::vector<Contact> &pResult) { EXPECT_EQ(lRef, pResult[0].id); });
     process();
   }
 }
@@ -87,7 +86,7 @@ TEST_F(PubsubTest, Broadcast) {
   }
 
   for (size_t i = 0; i <= lSubs / 10; i++) {
-    //std::cout << "refreshing node " << i << ", " << nodes[i]->self() << std::endl;
+    // std::cout << "refreshing node " << i << ", " << nodes[i]->self() << std::endl;
     nodes[i]->refreshTopic(lTopicID);
     process();
     // nodes[i]->topicRoutingTable(lTopicID).debug();
@@ -111,5 +110,5 @@ TEST_F(PubsubTest, Broadcast) {
     std::cout << (lCover * 100) << "% nodes received event in " << Node::sSentEvent << " messages in "
               << std::chrono::duration_cast<std::chrono::milliseconds>(lDelay).count() << "ms" << std::endl;
   }
-  ASSERT_GE(lTotalCover / lTests, 0.9);
+  EXPECT_GE(lTotalCover / lTests, 0.9);
 }

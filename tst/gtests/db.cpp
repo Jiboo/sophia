@@ -52,7 +52,7 @@ TEST(Database, PrivK) {
   lDb.storePrivKey(lID, lPK);
 
   auto lRetreivedK = lDb.loadPrivKey(lID);
-  EXPECT_TRUE(lRetreivedK.has_value());
+  ASSERT_TRUE(lRetreivedK.has_value());
   EXPECT_EQ(lPK->size(), (*lRetreivedK)->size());
   EXPECT_EQ(0, memcmp(lPK->data(), (*lRetreivedK)->data(), lPK->size()));
 }
@@ -73,7 +73,7 @@ TEST(Crypto, ValueSignature) {
   randombytes_buf(lValue.parent.data(), lValue.parent.size());
   lValue.signature = lValue.computeSignature(lPK);
 
-  ASSERT_TRUE(lValue.signatureValid());
+  EXPECT_TRUE(lValue.signatureValid());
 }
 
 TEST(Crypto, EventSignature) {
@@ -93,5 +93,5 @@ TEST(Crypto, EventSignature) {
   randombytes_buf(lEvent.topic.data(), lEvent.topic.size());
   lEvent.signature = lEvent.computeSignature(lPK);
 
-  ASSERT_TRUE(lEvent.signatureValid());
+  EXPECT_TRUE(lEvent.signatureValid());
 }

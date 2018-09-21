@@ -109,7 +109,7 @@ void Database::sqlClzDist(sqlite3_context *pContext, int pArgc, sqlite3_value **
 bool Database::hasProfileEntry(const std::string_view &pKey) {
   SOPHIA_CCALL(sqlite3_bind_text(selProfileStmt, 1, pKey.data(), (int)pKey.size(), nullptr));
   bool lResult = sqlite3_step(selProfileStmt) == SQLITE_ROW;
-  sqlite3_reset(selProfileStmt);
+  SOPHIA_CCALL(sqlite3_reset(selProfileStmt));
   return lResult;
 }
 
@@ -129,18 +129,17 @@ void Database::getProfileEntry(const std::string_view &pKey, buff_view_t pVal) {
   auto lValue = (void *)sqlite3_column_blob(selProfileStmt, 1);
   memcpy(pVal.data, lValue, (size_t)lSize);
 
-  sqlite3_reset(selProfileStmt);
+  SOPHIA_CCALL(sqlite3_reset(selProfileStmt));
 }
 
 keypairs_t Database::initialize(const passphrase_t &pPassphrase) {
   // auto lStart = Clock::now();
 
   auto lPassNonce = rand<u128>();
-  sensitive_t<u256> lSecretKey;
   static_assert(lPassNonce.size() == crypto_pwhash_SALTBYTES);
-  assert(lSecretKey->size() >= crypto_pwhash_BYTES_MIN);
-  assert(lSecretKey->size() <= crypto_pwhash_BYTES_MAX);
-  SOPHIA_CCALL(crypto_pwhash(lSecretKey->data(), lSecretKey->size(), pPassphrase->data(), pPassphrase->size(),
+  assert(secretKey->size() >= crypto_pwhash_BYTES_MIN);
+  assert(secretKey->size() <= crypto_pwhash_BYTES_MAX);
+  SOPHIA_CCALL(crypto_pwhash(secretKey->data(), secretKey->size(), pPassphrase->data(), pPassphrase->size(),
                              lPassNonce.data(), SOPHIA_PWHASH_OPSLIMIT, SOPHIA_PWHASH_MEMLIMIT,
                              crypto_pwhash_ALG_DEFAULT));
 
@@ -150,7 +149,7 @@ keypairs_t Database::initialize(const passphrase_t &pPassphrase) {
   u128 lVerifyCrypt;
   u128 lVerifyMac;
   SOPHIA_CCALL(crypto_secretbox_detached(lVerifyCrypt.data(), lVerifyMac.data(), lVerify.data(), lVerify.size(),
-                                         lVerifyNonce.data(), lSecretKey->data()));
+                                         lVerifyNonce.data(), secretKey->data()));
 
   u256 lEventPK;
   sensitive_t<u512> lEventSK;
@@ -165,7 +164,7 @@ keypairs_t Database::initialize(const passphrase_t &pPassphrase) {
   static_assert(lSKMac.size() == crypto_secretbox_MACBYTES);
   assert(lSKCrypt.size() == lEventSK->size());
   SOPHIA_CCALL(crypto_secretbox_detached(lSKCrypt.data(), lSKMac.data(), lEventSK->data(), lEventSK->size(),
-                                         lSKNonce.data(), lSecretKey->data()));
+                                         lSKNonce.data(), secretKey->data()));
 
   SOPHIA_CCALL(sqlite3_exec(db, "BEGIN;", nullptr, nullptr, nullptr));
   insertProfileEntry("publickey", lEventPK.view());
@@ -219,13 +218,17 @@ Database::Database(const char *pPath) {
 }
 
 Database::~Database() {
-  sqlite3_finalize(selProfileStmt);
   sqlite3_finalize(insProfileStmt);
-  sqlite3_finalize(selValueStmt);
+  sqlite3_finalize(selProfileStmt);
   sqlite3_finalize(insValueStmt);
-  sqlite3_finalize(selPrivKeyStmt);
+  sqlite3_finalize(selValueStmt);
+  sqlite3_finalize(hasValueStmt);
   sqlite3_finalize(insPrivKeyStmt);
+  sqlite3_finalize(selPrivKeyStmt);
   sqlite3_close(db);
+#ifndef NDEBUG
+  sqlite3_thread_cleanup();
+#endif
 }
 
 keypairs_t Database::loadProfile(const passphrase_t &pPassphrase) {
@@ -349,7 +352,7 @@ void Database::storePrivKey(const u256 &pID, const sensitive_t<u512> &pPrivKey) 
   SOPHIA_CCALL(crypto_secretbox_detached(lCrypt.data(), lMac.data(), pPrivKey->data(), pPrivKey->size(), lNonce.data(),
                                          secretKey->data()));
 
-  SOPHIA_CCALL(sqlite3_bind_blob(insPrivKeyStmt, 1, pID.data(), 32, nullptr));
+  SOPHIA_CCALL(sqlite3_bind_blob(insPrivKeyStmt, 1, pID.data(), pID.size(), nullptr));
   SOPHIA_CCALL(sqlite3_bind_blob(insPrivKeyStmt, 2, lNonce.data(), lNonce.size(), nullptr));
   SOPHIA_CCALL(sqlite3_bind_blob(insPrivKeyStmt, 3, lMac.data(), lMac.size(), nullptr));
   SOPHIA_CCALL(sqlite3_bind_blob(insPrivKeyStmt, 4, lCrypt.data(), lCrypt.size(), nullptr));
@@ -359,7 +362,7 @@ void Database::storePrivKey(const u256 &pID, const sensitive_t<u512> &pPrivKey) 
 }
 
 std::optional<sensitive_t<u512>> Database::loadPrivKey(const u256 &pID) {
-  SOPHIA_CCALL(sqlite3_bind_blob(selPrivKeyStmt, 1, pID.data(), 32, nullptr));
+  SOPHIA_CCALL(sqlite3_bind_blob(selPrivKeyStmt, 1, pID.data(), pID.size(), nullptr));
   int lResult = sqlite3_step(selPrivKeyStmt);
   if (lResult != SQLITE_ROW) {
     SOPHIA_CCALL(sqlite3_reset(selPrivKeyStmt));
@@ -382,6 +385,9 @@ std::optional<sensitive_t<u512>> Database::loadPrivKey(const u256 &pID) {
 
   SOPHIA_CCALL(sqlite3_reset(selPrivKeyStmt));
 
+  assert(lNonce.size() == crypto_secretbox_NONCEBYTES);
+  assert(lMac.size() == crypto_secretbox_MACBYTES);
+  assert(secretKey->size() == crypto_secretbox_KEYBYTES);
   SOPHIA_CCALL(crypto_secretbox_open_detached(lPrivK->data(), lCrypt.data(), lMac.data(), lCrypt.size(), lNonce.data(),
                                               secretKey->data()));
 

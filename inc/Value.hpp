@@ -20,7 +20,7 @@ struct Value {
   void read(cbuff_view_t &pSource);
   void write(buff_view_t &pDest, bool pForSign = true) const;
 
-  size_t serializedSize() const;
+  size_t serializedSize(bool pForSign = true) const;
   u512 computeSignature(const sensitive_t<u512> &pKey) const;
   bool signatureValid() const;
 
@@ -40,7 +40,7 @@ struct Event {
   void read(cbuff_view_t &pSource);
   void write(buff_view_t &pDest, bool pForSign = true) const;
 
-  size_t serializedSize() const;
+  size_t serializedSize(bool pForSign = true) const;
   u512 computeSignature(const sensitive_t<u512> &pKey) const;
   bool signatureValid() const;
 

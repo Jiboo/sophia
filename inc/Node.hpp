@@ -15,7 +15,7 @@ namespace sophia {
 class Node;
 
 enum MessageType {
-  eError = 0x00,
+  eResult = 0x00,
 
   ePing = 0x10,
   eClosestNodes = 0x11,
@@ -31,6 +31,8 @@ enum MessageType {
   ePubsubEvent = 0x32,
 
   ePubsubNodesResult = 0x38,
+
+  eRPC = 0x40,
 };
 
 enum class SophiaErrorCode {
@@ -46,6 +48,9 @@ enum class SophiaErrorCode {
   eNotUpToDate = 0x1303,
 
   eNotRegisted = 0x3000,
+
+  eNotSubscribed = 0x4000,
+  eInternalError = 0x4001,
 };
 
 struct SophiaErrorCategory : boost::system::error_category {
@@ -58,11 +63,12 @@ struct SophiaErrorCategory : boost::system::error_category {
 struct inflight_t {
   using Callback = std::function<void(ErrorCode, const Contact &, const u256 &, const cbuff_view_t &)>;
   net::deadline_timer timeout;
-  u256 id;
+  MessageType type;
   Contact dest;
+  u256 id;
   Callback callback;
 
-  inflight_t(net::io_service &pService, Contact pDest, const u256 &pID, Callback pCallback);
+  inflight_t(net::io_service &pService, MessageType pType, Contact pDest, const u256 &pID, Callback pCallback);
 
   inflight_t(inflight_t &&pOther) = default;
 };
@@ -142,7 +148,7 @@ class Node {
   void recieve();
 
   size_t prepareCommand(const Contact &pDest, const u256 &pID, MessageType pCommandType, u8 *pBuffer,
-                        const inflight_t::Callback &pCallback);
+                        const inflight_t::Callback &pCallback = {});
 
   void prepareReply(const Contact &pSource, MessageType pReplyType, const u8 *pCommandBuffer, u8 *pReplyBuffer);
   void recvResponse(const Contact &pSource, const cbuff_view_t &pBuff);
@@ -150,7 +156,7 @@ class Node {
   /**
    * Note: Don't reply to an illformed command
    */
-  void replyWithError(const Contact &pSource, const u8 *pCommandBuffer, SophiaErrorCode pError);
+  void replyWithResult(const Contact &pSource, const u8 *pCommandBuffer, SophiaErrorCode pError);
 
   size_t hashInflight(const u256 &pDest, uint32_t pToken);
 
@@ -164,7 +170,7 @@ class Node {
       std::function<void(ErrorCode pError, const Contact &pSource, const std::vector<Contact> &)>;
   using IterativeClosestNodesCallback = std::function<void(const std::vector<Contact> &)>;
   struct IterativeClosestNodesFunctor {
-    IterativeContext<IterativeClosestNodesCallback> *context;
+    std::shared_ptr<IterativeContext<IterativeClosestNodesCallback>> context;
     Node *node;
     void operator()(ErrorCode pError, const Contact &pSource, const std::vector<Contact> &pResults);
   };
@@ -177,7 +183,7 @@ class Node {
                                                const std::optional<Value> &)>;
   using IterativeFindValueCallback = std::function<void(const std::optional<Value> &)>;
   struct IterativeFindValueFunctor {
-    IterativeContext<IterativeFindValueCallback> *context;
+    std::shared_ptr<IterativeContext<IterativeFindValueCallback>> context;
     Node *node;
     void operator()(ErrorCode pError, const Contact &pSource, const std::vector<Contact> &pResults,
                     const std::optional<Value> &pVal);
@@ -190,7 +196,6 @@ class Node {
   using StoreCallback = std::function<void(ErrorCode pError, const Contact &pSource)>;
   size_t sendStore(const Contact &pDest, const Value &pValue, const StoreCallback &pCallback);
   void replyStore(const Contact &pSource, const cbuff_view_t &pBuff);
-  void storeOnClosests(const Value &pValue, const IterativeClosestNodesCallback &pCallback);
 
   using PubsubJoinCallback =
       std::function<void(ErrorCode pError, const Contact &pSource, const std::vector<Contact> &)>;
@@ -198,7 +203,7 @@ class Node {
   void replyPubsubJoin(const Contact &pSource, const cbuff_view_t &pBuff);
 
   struct IterativePubsubClosestNodesFunctor {
-    IterativePubsubContext<IterativeClosestNodesCallback> *context;
+    std::shared_ptr<IterativePubsubContext<IterativeClosestNodesCallback>> context;
     Node *node;
     void operator()(ErrorCode pError, const Contact &pSource, const std::vector<Contact> &pResults);
   };
@@ -212,6 +217,8 @@ class Node {
   size_t sendPubsubEvent(const Contact &pDest, const Event &pEvent);
   void handlePubsubEvent(const Contact &pSource, const cbuff_view_t &pBuff);
   void broadcastPubsubEvent(const Event &pEvent);
+
+  void handleRPC(const Contact &pSource, const cbuff_view_t &pBuff);
 
   void subscribeToKnownTopics();
 
@@ -240,6 +247,10 @@ public:
   u256 createTopic(const JoinCallback &pJoinCallback, const EventCallback &pEventCallback);
   void subscribe(const u256 &pTopicID, const JoinCallback &pJoinCallback, const EventCallback &pEventCallback);
   void publish(const u256 &pTopicID, u8 pEventType, u16 pEventExtra, const cbuff_view_t &pData);
+
+  using RPCCallback = std::function<void(ErrorCode)>;
+  void rpc(const u256 &pTargetNodeID, const u256 &pTargetContract, u32 pParam32, const u256 &pParam256,
+           const u512 &pParam512, const cbuff_view_t &pData, const RPCCallback &pCallback);
 
 #ifdef SOPHIA_EXTRA_API
   static uint64_t sSentEvent;

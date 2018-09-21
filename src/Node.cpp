@@ -1,4 +1,6 @@
 #include <utility>
+#include <Node.hpp>
+
 
 #include "Node.hpp"
 
@@ -19,11 +21,11 @@ Clock::time_point Node::sLastRecvEvent;
 std::string SophiaErrorCategory::message(int ev) const {
   switch ((SophiaErrorCode)ev) {
   case SophiaErrorCode::eNoError:
-    return "0x0: eNoError";
+    return "0x0000: eNoError";
   case SophiaErrorCode::eUnspecified:
-    return "0x1: eUnspecified";
+    return "0x0001: eUnspecified";
   case SophiaErrorCode::eIllformed:
-    return "0x2: eIllformed";
+    return "0x0002: eIllformed";
   case SophiaErrorCode::eMTUTooLow:
     return "0x1000: eMTUTooLow";
   case SophiaErrorCode::eLocalStoreFull:
@@ -36,6 +38,10 @@ std::string SophiaErrorCategory::message(int ev) const {
     return "0x1303: eNotUpToDate";
   case SophiaErrorCode::eNotRegisted:
     return "0x3000: eNotRegisted";
+  case SophiaErrorCode::eNotSubscribed:
+    return "0x4000: eNotSubscribed";
+  case SophiaErrorCode::eInternalError:
+    return "0x4001: eInternalError";
   }
   return std::string();
 }
@@ -47,8 +53,8 @@ const SophiaErrorCategory &SophiaErrorCategory::instance() {
 
 ErrorCode SophiaErrorCategory::wrap(SophiaErrorCode pCode) { return ErrorCode((int)pCode, instance()); }
 
-inflight_t::inflight_t(net::io_service &pService, Contact pDest, const u256 &pID, Callback pCallback)
-    : timeout(pService, SOPHIA_TIMEOUT), id(pID), dest(std::move(pDest)), callback(std::move(pCallback)) {}
+inflight_t::inflight_t(net::io_service &pService, MessageType pType, Contact pDest, const u256 &pID, Callback pCallback)
+    : timeout(pService, SOPHIA_TIMEOUT), type(pType), dest(std::move(pDest)), id(pID), callback(std::move(pCallback)) {}
 
 void Node::IterativeClosestNodesFunctor::operator()(ErrorCode pError, const Contact &pSource,
                                                     const std::vector<Contact> &pResults) {
@@ -125,7 +131,6 @@ void Node::IterativeClosestNodesFunctor::operator()(ErrorCode pError, const Cont
     lResults.resize(std::min((size_t)SOPHIA_K, lResults.size()));
 
     context->callback(lResults);
-    delete context;
   }
 }
 
@@ -203,7 +208,6 @@ void Node::IterativePubsubClosestNodesFunctor::operator()(ErrorCode pError, cons
     lResults.resize(std::min((size_t)SOPHIA_K, lResults.size()));
 
     context->callback(lResults);
-    delete context;
   }
 }
 
@@ -250,7 +254,6 @@ void Node::IterativeFindValueFunctor::operator()(ErrorCode pError, const Contact
   if (context->inflight.empty()) {
     if (!context->found)
       context->callback({});
-    delete context;
   }
 }
 
@@ -331,16 +334,20 @@ void Node::recieve() {
                                   handlePubsubEvent(lSource, lBuff);
                                   break;
 
+                                case eRPC:
+                                  handleRPC(lSource, lBuff);
+                                  break;
+
                                 case eNodesResult:
                                 case ePong:
-                                case eError:
+                                case eResult:
                                 case eValueResult:
                                 case ePubsubNodesResult:
                                   recvResponse(lSource, lBuff);
                                   break;
                                 default:
                                   std::cout << "[NET] unexpected command identifier" << std::endl;
-                                  replyWithError(lSource, lBuff.data, SophiaErrorCode::eIllformed);
+                                    replyWithResult(lSource, lBuff.data, SophiaErrorCode::eIllformed);
                                 }
                               } else {
                                 std::cout << "[NET] Error while opening message, ignoring." << std::endl;
@@ -351,7 +358,7 @@ void Node::recieve() {
 }
 
 size_t Node::prepareCommand(const Contact &pDest, const u256 &pID, MessageType pCommandType, u8 *pBuffer,
-                            const inflight_t::Callback &pCallback = {}) {
+                            const inflight_t::Callback &pCallback) {
   uint32_t lToken;
   size_t lID;
   do {
@@ -359,16 +366,16 @@ size_t Node::prepareCommand(const Contact &pDest, const u256 &pID, MessageType p
     lID = hashInflight(pDest.id, lToken);
   } while (inflights.find(lID) != inflights.end());
 
-  inflight_t lInflight{service, pDest, pID, pCallback};
+  inflight_t lInflight{service, pCommandType, pDest, pID, pCallback};
 
   if (pCallback) {
-    lInflight.timeout.async_wait([this, lID, lToken](const ErrorCode &pError) {
+    lInflight.timeout.async_wait([this, lID, lToken, lType = lInflight.type](const ErrorCode &pError) {
       auto lRef = inflights.find(lID);
       if (pError != boost::asio::error::operation_aborted && lRef != inflights.end()) {
         auto lEntry = routing.findEntry(lRef->second.dest.id);
         std::cout << "[NET] Inflight timeout " << self() << ", to " << lRef->second.dest << ", token: " << std::hex
                   << (htonl(lToken) >> 8) << ", " << lID << std::dec << ", has entry: " << (lEntry != nullptr)
-                  << std::endl;
+                  << ", type: " << lType << std::endl;
         if (lEntry != nullptr) {
           lEntry->sentCommands++;
         }
@@ -393,9 +400,9 @@ void Node::prepareReply(const Contact &pSource, MessageType pReplyType, const u8
     lEntry->lastContact = Clock::now();
 }
 
-void Node::replyWithError(const Contact &pSource, const u8 *pCommandBuffer, SophiaErrorCode pError) {
+void Node::replyWithResult(const Contact &pSource, const u8 *pCommandBuffer, SophiaErrorCode pError) {
   u8 lReply[4 + 4];
-  prepareReply(pSource, eError, pCommandBuffer, lReply);
+  prepareReply(pSource, eResult, pCommandBuffer, lReply);
   auto *lError = reinterpret_cast<uint32_t *>(lReply + 4);
   *lError = htonl((uint32_t)pError);
   send(pSource, {lReply, sizeof(lReply)});
@@ -417,7 +424,7 @@ void Node::recvResponse(const Contact &pSource, const cbuff_view_t &pBuff) {
   lInflight->second.timeout.cancel();
   routing.addRTT(pSource, lRTT.total_microseconds() / 1000000.f);
 
-  if (pBuff.data[0] != eError) {
+  if (pBuff.data[0] != eResult) {
     lInflight->second.callback(sNoError, pSource, lInflight->second.id, pBuff);
   } else {
     assert(pBuff.size == 8);
@@ -448,7 +455,7 @@ size_t Node::sendPing(const Contact &pDest, const Node::PingCallback &pCallback)
     }
 
     if (pBuff.data[0] != ePong) {
-      pCallback(sNoError, pSource);
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed), pSource);
       return;
     }
 
@@ -481,7 +488,7 @@ void Node::replyPing(const Contact &pSource, const cbuff_view_t &pBuff) {
   prepareReply(pSource, ePong, pBuff.data, lReply);
 
   if (pBuff.size != sizeof(lReply)) {
-    replyWithError(pSource, pBuff.data, SophiaErrorCode::eMTUTooLow);
+    replyWithResult(pSource, pBuff.data, SophiaErrorCode::eMTUTooLow);
     return;
   }
 
@@ -557,7 +564,7 @@ void Node::replyClosestNodes(const Contact &pSource, const cbuff_view_t &pBuff) 
 }
 
 void Node::iterativeClosestNodes(const u256 &pKey, const Node::IterativeClosestNodesCallback &pCallback) {
-  auto lContext = new IterativeContext<Node::IterativeClosestNodesCallback>(pKey, pCallback);
+  auto lContext = std::make_shared<IterativeContext<Node::IterativeClosestNodesCallback>>(pKey, pCallback);
 
   size_t lCount = routing.closestNodes(pKey, lContext->inflight.data(), SOPHIA_ALPHA, nullptr);
   lContext->inflight.resize(lCount);
@@ -630,7 +637,7 @@ void Node::replyFindValue(const Contact &pSource, const cbuff_view_t &pBuff) {
   if (!lValue) {
     replyClosestNodes(pSource, pBuff);
   } else {
-    size_t lValueSize = lValue->serializedSize();
+    size_t lValueSize = lValue->serializedSize(false);
     u8 lReply[4 + lValueSize];
     prepareReply(pSource, eValueResult, pBuff.data, lReply);
     buff_view_t lValueBuff{lReply + 4, lValueSize};
@@ -640,7 +647,7 @@ void Node::replyFindValue(const Contact &pSource, const cbuff_view_t &pBuff) {
 }
 
 void Node::iterativeFindValue(const u256 &pKey, const Node::IterativeFindValueCallback &pCallback) {
-  auto lContext = new IterativeContext<Node::IterativeFindValueCallback>(pKey, pCallback);
+  auto lContext = std::make_shared<IterativeContext<Node::IterativeFindValueCallback>>(pKey, pCallback);
 
   size_t lCount = routing.closestNodes(pKey, lContext->inflight.data(), SOPHIA_ALPHA, nullptr);
   lContext->inflight.resize(lCount);
@@ -655,7 +662,7 @@ size_t Node::sendStore(const Contact &pDest, const Value &pValue, const Node::St
     pCallback(pError, pSource);
   };
 
-  size_t lSize = 4 + pValue.serializedSize();
+  size_t lSize = 4 + pValue.serializedSize(false);
   u8 lCommand[lSize];
 
   size_t lToken = prepareCommand(pDest, pDest.id, eStoreValue, lCommand, lCallback);
@@ -692,7 +699,7 @@ void Node::replyStore(const Contact &pSource, const cbuff_view_t &pBuff) {
     }
   }
 
-  replyWithError(pSource, pBuff.data, (SophiaErrorCode)lErrorCode);
+  replyWithResult(pSource, pBuff.data, (SophiaErrorCode) lErrorCode);
 }
 
 size_t Node::sendPubsubJoin(const Contact &pDest, const u256 &pTopicID, const Node::PubsubJoinCallback &pCallback) {
@@ -762,7 +769,7 @@ void Node::replyPubsubJoin(const Contact &pSource, const cbuff_view_t &pBuff) {
   auto lTopicContext = topics.find(lID);
   if (lTopicContext == topics.end()) {
     // std::cout << self() << " ignoring " << pSource << " join, unknown topic." << std::endl;
-    replyWithError(pSource, pBuff.data, SophiaErrorCode::eNotRegisted);
+    replyWithResult(pSource, pBuff.data, SophiaErrorCode::eNotRegisted);
     return;
   }
 
@@ -875,7 +882,7 @@ void Node::iterativePubsubClosestNodes(const u256 &pTopic, const u256 &pKey,
     return;
 
   auto &lRouting = lTopicContext->second.routing;
-  auto lContext = new IterativePubsubContext<Node::IterativeClosestNodesCallback>(pTopic, pKey, pCallback);
+  auto lContext = std::make_shared<IterativePubsubContext<Node::IterativeClosestNodesCallback>>(pTopic, pKey, pCallback);
 
   size_t lCount = lRouting.closestNodes(pKey, lContext->inflight.data(), SOPHIA_ALPHA, nullptr);
   lContext->inflight.resize(lCount);
@@ -887,7 +894,7 @@ void Node::iterativePubsubClosestNodes(const u256 &pTopic, const u256 &pKey,
 }
 
 size_t Node::sendPubsubEvent(const Contact &pDest, const Event &pEvent) {
-  size_t lSize = 4 + pEvent.serializedSize();
+  size_t lSize = 4 + pEvent.serializedSize(false);
   u8 lCommand[lSize];
 
   size_t lToken = prepareCommand(pDest, pDest.id, ePubsubEvent, lCommand);
@@ -920,8 +927,6 @@ void Node::handlePubsubEvent(const Contact &pSource, const cbuff_view_t &pBuff) 
   if (lContext == topics.end())
     return;
 
-  SophiaErrorCode lErrorCode = SophiaErrorCode::eNoError;
-
   auto &lKnownEvents = lContext->second.knownEvents;
   if (lKnownEvents.find(lEvent.signature) == lKnownEvents.end()) {
     lKnownEvents.emplace(lEvent.signature);
@@ -934,12 +939,8 @@ void Node::handlePubsubEvent(const Contact &pSource, const cbuff_view_t &pBuff) 
       lIncremented.height++;
       broadcastPubsubEvent(lIncremented);
       lContext->second.callback(lEvent);
-    } else {
-      lErrorCode = SophiaErrorCode::eInvalidSignature;
     }
   }
-
-  replyWithError(pSource, pBuff.data, lErrorCode);
 }
 
 void Node::broadcastPubsubEvent(const Event &pEvent) {
@@ -1199,4 +1200,70 @@ void Node::publish(const u256 &pTopicID, u8 pEventType, u16 pEventExtra, const c
 
   lContext->second.knownEvents.emplace(lEvent.signature);
   broadcastPubsubEvent(lEvent);
+}
+
+void Node::rpc(const u256 &pTargetNodeID, const u256 &pTargetContract, u32 pParam32, const u256 &pParam256,
+               const u512 &pParam512, const cbuff_view_t &pData, const RPCCallback &pCallback) {
+  const auto *lEntry = routing.findEntry(pTargetNodeID);
+  if (lEntry == nullptr) {
+    // FIXME Closest node with pTargetNodeID to check if someone knows it
+    pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eNotRegisted));
+    return;
+  }
+
+  const size_t lSize = 4 + 32 + 4 + 32 + 64 + pData.size;
+  u8 lCommand[lSize];
+
+  auto lCallback = [pCallback](ErrorCode pError, const Contact &pSource, const u256 &pID, const cbuff_view_t &pBuff) {
+    if (pError != nullptr) {
+      if (pCallback)
+        pCallback(pError);
+      return;
+    }
+
+    if (pBuff.data[0] != eResult) {
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eIllformed));
+      return;
+    }
+
+    if (pCallback)
+      pCallback(SophiaErrorCategory::wrap(SophiaErrorCode::eNoError));
+  };
+
+  prepareCommand(lEntry->contact, pTargetContract, eRPC, lCommand, lCallback);
+  buff_view_t lBuff {lCommand + 4, lSize - 4};
+
+  writeBuff(lBuff, pTargetContract.view());
+  writeField(lBuff, htonl(pParam32));
+  writeBuff(lBuff, pParam256.view());
+  writeBuff(lBuff, pParam512.view());
+  writeBuff(lBuff, pData);
+  assert(lBuff.size == 0);
+
+  send(lEntry->contact, {lCommand, lSize});
+}
+
+void Node::handleRPC(const Contact &pSource, const cbuff_view_t &pBuff) {
+  if (pBuff.size < 132 + 4) {
+    // TODO Blacklist
+    return;
+  }
+
+  cbuff_view_t lReadBuff = pBuff;
+  lReadBuff.seek(4);
+
+  u256 lContract;
+  u32 lParam32;
+  u256 lParam256;
+  u512 lParam512;
+
+  readBuff(lContract.view(), lReadBuff);
+  readField<u32>(&lParam32, lReadBuff);
+  lParam32 = ntohl(lParam32);
+  readBuff(lParam256.view(), lReadBuff);
+  readBuff(lParam512.view(), lReadBuff);
+
+  // TODO Call contract
+
+  replyWithResult(pSource, pBuff.data, SophiaErrorCode::eNotSubscribed);
 }
