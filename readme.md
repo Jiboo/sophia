@@ -443,13 +443,13 @@ Performances
 Thus charts where generated using stats dumped by tst/network.cpp
 ([details](https://docs.google.com/spreadsheets/d/189yyDMZGnVGXWnAGIDQU8gQEYjUCgjoe7d_x6gyTRhw/edit?usp=sharing)).
 
-[store delay vs node count](res/store_delay.png)
-[store traffic vs node count](res/store_traffic.png)
+![store delay vs node count](res/store_delay.png)
+![store traffic vs node count](res/store_traffic.png)
 
-[find delay vs node count](res/find_delay.png)
-[find hops vs node count](res/find_hops.png)
-[find traffic vs node count](res/find_traffic.png)
+![find delay vs node count](res/find_delay.png)
+![find hops vs node count](res/find_hops.png)
+![find traffic vs node count](res/find_traffic.png)
 
-[event coverage vs node count](res/pub_coverage.png)
-[event propagation delay vs node count](res/pub_delay.png)
-[event traffic vs node count](res/pub_traffic.png)
+![event coverage vs node count](res/pub_coverage.png)
+![event propagation delay vs node count](res/pub_delay.png)
+![event traffic vs node count](res/pub_traffic.png)
