@@ -7,34 +7,33 @@ using namespace sophia;
 class PubsubTest : public SophiaNetworkTest {};
 
 TEST_F(PubsubTest, Join) {
-  u256 lTopicID = nodes[0]->createTopic([] {}, [](const Event &pEvent) {});
+  u256 lTopicID = nodes[0]->createTopic([](const Event &pEvent) {}, [] {});
   process();
 
   const size_t lSubs = SOPHIA_K;
   for (size_t i = 1; i <= lSubs; i++) {
     // std::cout << "node " << i << ", " << nodes[i]->self() << " trying to join..." << std::endl;
-    nodes[i]->subscribe(lTopicID,
+    nodes[i]->subscribe(lTopicID, [](const Event &pEvent) {},
                         [this, i, lTopicID]() {
                           // std::cout << "node " << i << ", " << nodes[i]->self() << " joined" << std::endl;
                           // nodes[i]->topicRoutingTable(lTopicID).debug();
                           EXPECT_EQ(i, nodes[i]->topicRoutingTable(lTopicID).countNodes());
-                        },
-                        [](const Event &pEvent) {});
+                        });
     process();
   }
 }
 
 TEST_F(PubsubTest, ClosestNodes) {
-  u256 lTopicID = nodes[0]->createTopic([] {}, [](const Event &pEvent) {});
+  u256 lTopicID = nodes[0]->createTopic([](const Event &pEvent) {}, [] {});
   process();
 
   const size_t lSubs = nodes.size() - 1;
   for (size_t i = 1; i <= lSubs; i++) {
-    nodes[i]->subscribe(lTopicID, []() {}, [](const Event &pEvent) {});
+    nodes[i]->subscribe(lTopicID, [](const Event &pEvent) {}, []() {});
     process();
   }
 
-  for (size_t i = 0; i <= lSubs / 10; i++) {
+  for (size_t i = 0; i <= lSubs; i++) {
     // std::cout << "refreshing node " << i << ", " << nodes[i]->self() << std::endl;
     nodes[i]->refreshTopic(lTopicID);
     process();
@@ -59,33 +58,33 @@ TEST_F(PubsubTest, Broadcast) {
   size_t lHandled = 0;
 
   u256 lTopicID = nodes[0]->createTopic(
-      [/*this*/]() {
-        // std::cout << "node 0, " << nodes[0]->self() << " joined " << std::endl;
-        // nodes[0]->topicRoutingTable(lTopicID).debug();
-      },
       [&lHandled /*, this*/](const Event &pEvent) {
         lHandled++;
         // std::cout << "node 0, " << nodes[0]->self() << " got event " << cbuff_view_t{pEvent.signature.data(), 4} <<
         // std::endl;
+      },
+      [/*this*/]() {
+        // std::cout << "node 0, " << nodes[0]->self() << " joined " << std::endl;
+        // nodes[0]->topicRoutingTable(lTopicID).debug();
       });
   process();
 
   const size_t lSubs = nodes.size() - 1;
   for (size_t i = 1; i <= lSubs; i++) {
     nodes[i]->subscribe(lTopicID,
-                        [/*this, i, lTopicID*/]() {
-                          // std::cout << "node " << i << ", " << nodes[i]->self() << " joined " << lTopicID <<
-                          // std::endl;
-                        },
                         [/*this, i,*/ &lHandled](const Event &pEvent) {
                           lHandled++;
                           // std::cout << "node " << i << ", " << nodes[i]->self() << " got event " <<
                           // cbuff_view_t{pEvent.signature.data(), 4} << std::endl;
+                        },
+                        [/*this, i, lTopicID*/]() {
+                          // std::cout << "node " << i << ", " << nodes[i]->self() << " joined " << lTopicID <<
+                          // std::endl;
                         });
     process();
   }
 
-  for (size_t i = 0; i <= lSubs / 10; i++) {
+  for (size_t i = 0; i <= lSubs; i++) {
     // std::cout << "refreshing node " << i << ", " << nodes[i]->self() << std::endl;
     nodes[i]->refreshTopic(lTopicID);
     process();
@@ -96,7 +95,7 @@ TEST_F(PubsubTest, Broadcast) {
   const size_t lTests = lSubs / 10;
   for (size_t i = 0; i < lTests; i++) {
     lHandled = 0;
-    Node::sSentEvent = 0;
+    Node::sSentMsg.clear();
     size_t lSourceIndex = randombytes_uniform(lSubs);
     std::vector<uint8_t> lData;
     lData.resize(1024);
@@ -106,9 +105,9 @@ TEST_F(PubsubTest, Broadcast) {
     process();
     float lCover = lHandled / float(lSubs);
     lTotalCover += lCover;
-    auto lDelay = Node::sLastRecvEvent - lStart;
-    std::cout << (lCover * 100) << "% nodes received event in " << Node::sSentEvent << " messages in "
-              << std::chrono::duration_cast<std::chrono::milliseconds>(lDelay).count() << "ms" << std::endl;
+    auto lDelay = Node::sLastProcessedEvent - lStart;
+    std::cout << (lCover * 100) << "% nodes received event in " << Node::sSentMsg[MessageType::ePubsubEvent]
+              << " messages in " << sophia::dur_t{lDelay} << std::endl;
   }
   EXPECT_GE(lTotalCover / lTests, 0.9);
 }

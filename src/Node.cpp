@@ -1,6 +1,5 @@
-#include <utility>
 #include <Node.hpp>
-
+#include <utility>
 
 #include "Node.hpp"
 
@@ -14,8 +13,9 @@ constexpr bool sDebugIterativePubsubClosestNodes = false;
 const char *SophiaErrorCategory::name() const noexcept { return "sophia protocol error"; }
 
 #ifdef SOPHIA_EXTRA_API
-uint64_t Node::sSentEvent = 0;
-Clock::time_point Node::sLastRecvEvent;
+std::unordered_map<MessageType, uint64_t> Node::sSentMsg;
+std::unordered_map<MessageType, Clock::time_point> Node::sLastRecvMsg;
+Clock::time_point Node::sLastProcessedEvent;
 #endif
 
 std::string SophiaErrorCategory::message(int ev) const {
@@ -265,6 +265,9 @@ size_t Node::hashInflight(const u256 &pDest, uint32_t pToken) {
 }
 
 void Node::send(const Contact &pDest, const cbuff_view_t &pBuff) {
+#ifdef SOPHIA_EXTRA_API
+  sSentMsg[MessageType(pBuff.data[0])]++;
+#endif
   size_t lMessSize = sHeaderSize + pBuff.size;
   auto lBuff = new u8[lMessSize];
   u8 *lNonce = lBuff + sNonceOffset;
@@ -296,6 +299,10 @@ void Node::recieve() {
                             if (pError != nullptr) {
                               std::cout << "[NET] Got error on recv: " << pError.message() << std::endl;
                             } else {
+#ifdef SOPHIA_DEBUG_DROP_RATE
+                              if (randombytes_uniform(10000) / float(10000) < SOPHIA_DEBUG_DROP_RATE)
+                                return;
+#endif
                               Contact lSource;
                               lSource.address = lastDist.address();
                               lSource.port = lastDist.port();
@@ -310,6 +317,9 @@ void Node::recieve() {
                                                            lSource.id.data(), keypair.msgSK.contained.data()) == 0) {
                                 cbuff_view_t lBuff{lDecrypted.data(), lMessLen};
                                 auto lCommand = (MessageType)lBuff.data[0];
+#ifdef SOPHIA_EXTRA_API
+                                sLastRecvMsg[lCommand] = Clock::now();
+#endif
                                 switch (lCommand) {
                                 case ePing:
                                   replyPing(lSource, lBuff);
@@ -347,7 +357,7 @@ void Node::recieve() {
                                   break;
                                 default:
                                   std::cout << "[NET] unexpected command identifier" << std::endl;
-                                    replyWithResult(lSource, lBuff.data, SophiaErrorCode::eIllformed);
+                                  replyWithResult(lSource, lBuff.data, SophiaErrorCode::eIllformed);
                                 }
                               } else {
                                 std::cout << "[NET] Error while opening message, ignoring." << std::endl;
@@ -699,7 +709,7 @@ void Node::replyStore(const Contact &pSource, const cbuff_view_t &pBuff) {
     }
   }
 
-  replyWithResult(pSource, pBuff.data, (SophiaErrorCode) lErrorCode);
+  replyWithResult(pSource, pBuff.data, (SophiaErrorCode)lErrorCode);
 }
 
 size_t Node::sendPubsubJoin(const Contact &pDest, const u256 &pTopicID, const Node::PubsubJoinCallback &pCallback) {
@@ -882,7 +892,8 @@ void Node::iterativePubsubClosestNodes(const u256 &pTopic, const u256 &pKey,
     return;
 
   auto &lRouting = lTopicContext->second.routing;
-  auto lContext = std::make_shared<IterativePubsubContext<Node::IterativeClosestNodesCallback>>(pTopic, pKey, pCallback);
+  auto lContext =
+      std::make_shared<IterativePubsubContext<Node::IterativeClosestNodesCallback>>(pTopic, pKey, pCallback);
 
   size_t lCount = lRouting.closestNodes(pKey, lContext->inflight.data(), SOPHIA_ALPHA, nullptr);
   lContext->inflight.resize(lCount);
@@ -904,9 +915,6 @@ size_t Node::sendPubsubEvent(const Contact &pDest, const Event &pEvent) {
   // std::cout << "event " << cbuff_view_t{pEvent.signature.data(), 4} << " from " << self() << " to " << pDest <<
   // std::endl;
 
-#ifdef SOPHIA_EXTRA_API
-  sSentEvent++;
-#endif
   send(pDest, {lCommand, sizeof(lCommand)});
 
   return lToken;
@@ -932,7 +940,7 @@ void Node::handlePubsubEvent(const Contact &pSource, const cbuff_view_t &pBuff) 
     lKnownEvents.emplace(lEvent.signature);
     if (lEvent.signatureValid()) {
 #ifdef SOPHIA_EXTRA_API
-      sLastRecvEvent = Clock::now();
+      sLastProcessedEvent = Clock::now();
 #endif
       lContext->second.routing.mayAddNewContact(pSource);
       Event lIncremented(lEvent);
@@ -957,7 +965,7 @@ void Node::broadcastPubsubEvent(const Event &pEvent) {
   const auto &lRouting = lContext->second.routing;
   if (pEvent.height == 0 && lRouting.buckets.size() == 1 && lRouting.buckets[0].size() <= SOPHIA_K) {
     // If node in topic <= 20, as other node have on bucket only, none will broadcast as height == 1
-    // So we sent to the whole network
+    // So we sent to all known nodes
     const auto &lEntries = lRouting.buckets[0].contacts;
     for (const auto &lEntry : lEntries)
       sendPubsubEvent(lEntry.contact, pEvent);
@@ -1120,7 +1128,7 @@ void Node::refreshTopic(const u256 &pTopicID) {
   });
 }
 
-u256 Node::createTopic(const JoinCallback &pJoinCallback, const EventCallback &pEventCallback) {
+u256 Node::createTopic(const EventCallback &pEventCallback, const JoinCallback &pJoinCallback) {
   Value lTopicBootstrap;
 
   u256 lPublicKey;
@@ -1142,12 +1150,12 @@ u256 Node::createTopic(const JoinCallback &pJoinCallback, const EventCallback &p
 
   // std::cout << self() << " created topic " << lTopicBootstrap.id << std::endl;
   put(lTopicBootstrap,
-      [this, lPublicKey, pJoinCallback, pEventCallback]() { subscribe(lPublicKey, pJoinCallback, pEventCallback); });
+      [this, lPublicKey, pJoinCallback, pEventCallback]() { subscribe(lPublicKey, pEventCallback, pJoinCallback); });
 
   return lPublicKey;
 }
 
-void Node::subscribe(const u256 &pTopicID, const JoinCallback &pJoinCallback, const EventCallback &pEventCallback) {
+void Node::subscribe(const u256 &pTopicID, const EventCallback &pEventCallback, const JoinCallback &pJoinCallback) {
   auto lKnownTopic = topics.find(pTopicID);
 
   if (lKnownTopic != topics.end() && pEventCallback && lKnownTopic->second.callback) {
@@ -1231,7 +1239,7 @@ void Node::rpc(const u256 &pTargetNodeID, const u256 &pTargetContract, u32 pPara
   };
 
   prepareCommand(lEntry->contact, pTargetContract, eRPC, lCommand, lCallback);
-  buff_view_t lBuff {lCommand + 4, lSize - 4};
+  buff_view_t lBuff{lCommand + 4, lSize - 4};
 
   writeBuff(lBuff, pTargetContract.view());
   writeField(lBuff, htonl(pParam32));

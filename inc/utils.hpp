@@ -13,10 +13,11 @@
 
 #include <sodium.h>
 
-#define SOPHIA_TIMEOUT boost::posix_time::milliseconds(5000)
+#define SOPHIA_TIMEOUT boost::posix_time::milliseconds(250)
 #define SOPHIA_K 20
 #define SOPHIA_ALPHA 3
 #define SOPHIA_EVENT_REPLICATION 2
+//#define SOPHIA_DEBUG_DROP_RATE 0.2 FIXME
 
 #define SOPHIA_CCALL(expr)                                                                                             \
   if (expr)                                                                                                            \

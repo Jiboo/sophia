@@ -244,8 +244,8 @@ public:
 
   using JoinCallback = std::function<void()>;
   using EventCallback = TopicContext::EventCallback;
-  u256 createTopic(const JoinCallback &pJoinCallback, const EventCallback &pEventCallback);
-  void subscribe(const u256 &pTopicID, const JoinCallback &pJoinCallback, const EventCallback &pEventCallback);
+  u256 createTopic(const EventCallback &pEventCallback, const JoinCallback &pJoinCallback);
+  void subscribe(const u256 &pTopicID, const EventCallback &pEventCallback, const JoinCallback &pJoinCallback);
   void publish(const u256 &pTopicID, u8 pEventType, u16 pEventExtra, const cbuff_view_t &pData);
 
   using RPCCallback = std::function<void(ErrorCode)>;
@@ -253,8 +253,9 @@ public:
            const u512 &pParam512, const cbuff_view_t &pData, const RPCCallback &pCallback);
 
 #ifdef SOPHIA_EXTRA_API
-  static uint64_t sSentEvent;
-  static Clock::time_point sLastRecvEvent;
+  static std::unordered_map<MessageType, uint64_t> sSentMsg;
+  static std::unordered_map<MessageType, Clock::time_point> sLastRecvMsg;
+  static Clock::time_point sLastProcessedEvent;
   inline const Table &routingTable() const { return routing; }
   inline Table &topicRoutingTable(const u256 &pTopic) { return topics[pTopic].routing; }
   using SimplePingCallback = std::function<void()>;

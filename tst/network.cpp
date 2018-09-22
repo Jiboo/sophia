@@ -1,11 +1,16 @@
 #include "Node.hpp"
 using namespace sophia;
 
+inline void process(net::io_service &pService) {
+  while (pService.run_for(std::chrono::milliseconds(10)) > 0);
+}
+
 int main(int argc, char **argv) {
   passphrase_t lPassphrase("test");
 
   net::io_service lService;
-  size_t lNodesCount = 400; // std::stoul(argv[1]);
+  size_t lNodesCount = argc > 1 ? std::stoul(argv[1]) : 100;
+  size_t lTestsCount = argc > 2 ? std::stoul(argv[2]) : 10;
 
   std::unique_ptr<Node> lNodes[lNodesCount];
 
@@ -21,54 +26,108 @@ int main(int argc, char **argv) {
     if (i > 0)
       lNodes[i]->bootstrap(lNodes[0]->self(), []() {});
 
-    lService.run_for(std::chrono::milliseconds(250));
+    process(lService);
   }
 
   std::cout << "[TST] Initialized " << lNodesCount << " nodes in " << dur_t{Clock::now() - lInitStart} << std::endl;
 
-  lService.run_for(std::chrono::seconds(1));
+  auto lRefreshStart = Clock::now();
+  for (size_t i = 0; i < lNodesCount; i++) {
+    auto lRefreshNodeStart = Clock::now();
+    Node::sSentMsg.clear();
+    lNodes[i]->refreshBuckets();
+    process(lService);
+    std::cout << "[TST] Node " << i << " refreshed in " << dur_t{Clock::now() - lRefreshNodeStart}
+              << ", closest_nodes: " << Node::sSentMsg[MessageType::eClosestNodes]
+              << ", nodes_result: " << Node::sSentMsg[MessageType::eNodesResult] << std::endl;
+  }
 
-  /*for (size_t i = 1; i < lNodesCount; i++) {
-    lNodes[i]->bootstrap(lNodes[0]->self());
-    lService.run_for(std::chrono::milliseconds(5));
-  }*/
+  std::cout << "[TST] Refreshed buckets in " << dur_t{Clock::now() - lRefreshStart} << std::endl;
 
   Value lTemp;
-  for (size_t lValIndex = 0; lValIndex < lNodesCount * 72; lValIndex++) {
+  for (size_t lValIndex = 0; lValIndex < lTestsCount; lValIndex++) {
     randValue(lTemp);
-
-    // std::cout << "[TST] Generated value " << lTemp.id.view() << std::endl;
 
     Node *lWriter = lNodes[randombytes_uniform(lNodesCount)].get();
     auto lPutStart = Clock::now();
+    Node::sSentMsg.clear();
     lWriter->put(lTemp, [&lNodes, lNodesCount, lTemp, lPutStart] {
-      // std::cout << "[TST] Put " << lTemp.id.view() << " in " << dur_t{Clock::now() - lPutStart} << std::endl;
+      std::cout << "[TST] Put in " << dur_t{Clock::now() - lPutStart}
+                << ", closest_nodes: " << Node::sSentMsg[MessageType::eClosestNodes]
+                << ", nodes_result: " << Node::sSentMsg[MessageType::eNodesResult]
+                << ", store: " << Node::sSentMsg[MessageType::eStoreValue]
+                << ", result: " << Node::sSentMsg[MessageType::eResult] << std::endl;
 
       Node *lReader = lNodes[randombytes_uniform(lNodesCount)].get();
       auto lGetStart = Clock::now();
-      lReader->get(lTemp.id, [lGetStart, lReader, lTemp](const std::optional<Value> &pValue) {
+      Node::sSentMsg.clear();
+      lReader->get(lTemp.id, [lGetStart, lTemp](const std::optional<Value> &pValue) {
         if (pValue) {
-          // std::cout << "[TST] Found " << lTemp.id.view() << " in " << dur_t{Clock::now() - lGetStart} << std::endl;
+          std::cout << "[TST] Found in ";
         } else {
           // lReader->debugRouteTable();
-          std::cout << "[TST] Failed " << lTemp.id.view() << " in " << dur_t{Clock::now() - lGetStart} << std::endl;
+          std::cout << "[TST] Failed in ";
         }
+        std::cout << dur_t{Clock::now() - lGetStart} << ", find_value: " << Node::sSentMsg[MessageType::eFindValue]
+                  << ", nodes_result: " << Node::sSentMsg[MessageType::eNodesResult]
+                  << ", value_result: " << Node::sSentMsg[MessageType::eValueResult] << std::endl;
       });
     });
-    lService.run_for(std::chrono::milliseconds(250));
+    process(lService);
   }
 
-  /*u256 lTopicID = lNodes[0]->createTopic([](const Event &pEvent){
+  auto lSubscribeStart = Clock::now();
+  uint64_t lReceived = 0;
+  u256 lTopicID = lNodes[0]->createTopic([&lReceived](const Event &pEvent) { lReceived++; }, {});
+  process(lService);
 
-  });
   for (size_t lNodeIndex = 1; lNodeIndex < lNodesCount; lNodeIndex++) {
-    lNodes[lNodeIndex]->subscribe(lTopicID, [](const Event &pEvent){
+    Node::sSentMsg.clear();
+    auto lSubscribeNodeStart = Clock::now();
+    lNodes[lNodeIndex]->subscribe(lTopicID, [&lReceived](const Event &pEvent) { lReceived++; }, {});
+    process(lService);
+    std::cout << "[TST] Node " << lNodeIndex << " joined topic in " << dur_t{Clock::now() - lSubscribeNodeStart}
+              << ", closest_nodes: " << Node::sSentMsg[MessageType::eClosestNodes]
+              << ", nodes_result: " << Node::sSentMsg[MessageType::eNodesResult]
+              << ", pubsub_join: " << Node::sSentMsg[MessageType::ePubsubJoin]
+              << ", pubsub_closest_nodes: " << Node::sSentMsg[MessageType::ePubsubNodesResult] << std::endl;
+  }
 
-    });
-  }*/
-  // TODO Send events and check the percentage of nodes that got it, spread time, etc..
+  std::cout << "[TST] Created and joined topic in " << dur_t{Clock::now() - lSubscribeStart} << std::endl;
 
-  std::cerr << "[TST] Done tests" << std::endl;
+  auto lRefreshTopicStart = Clock::now();
+  for (size_t i = 0; i < lNodesCount; i++) {
+    auto lRefreshTopicNodeStart = Clock::now();
+    Node::sSentMsg.clear();
+    lNodes[i]->refreshTopicBuckets(lTopicID);
+    process(lService);
+    std::cout << "[TST] Node " << i << " refreshed topic buckets in " << dur_t{Clock::now() - lRefreshTopicNodeStart}
+              << ", closest_nodes: " << Node::sSentMsg[MessageType::eClosestNodes]
+              << ", nodes_result: " << Node::sSentMsg[MessageType::eNodesResult]
+              << ", pubsub_join: " << Node::sSentMsg[MessageType::ePubsubJoin]
+              << ", pubsub_closest_nodes: " << Node::sSentMsg[MessageType::ePubsubNodesResult] << std::endl;
+  }
+
+  std::cout << "[TST] Refreshed topic buckets in " << dur_t{Clock::now() - lRefreshTopicStart} << std::endl;
+
+  for (size_t lValIndex = 0; lValIndex < lTestsCount; lValIndex++) {
+    lReceived = 0;
+    Node::sSentMsg.clear();
+    size_t lSourceIndex = randombytes_uniform(lNodesCount);
+    std::vector<uint8_t> lData;
+    lData.resize(1024);
+    randombytes_buf(lData.data(), lData.size());
+    auto lPublishStart = Clock::now();
+    lNodes[lSourceIndex]->publish(lTopicID, 0, 0, cbuff_view_t{lData.data(), lData.size()});
+    process(lService);
+    float lCover = (lReceived + 1) / float(lNodesCount);
+    auto lDelay = Node::sLastProcessedEvent - lPublishStart;
+    std::cout << "[TST] publish stats: spread in " << sophia::dur_t{lDelay} << ", cover: " << (lCover * 100)
+              << "%, with " << Node::sSentMsg[MessageType::ePubsubEvent] / float(lNodesCount) << " messages/node"
+              << std::endl;
+  }
+
+  std::cout << "[TST] Done tests" << std::endl;
 
   lService.run_for(std::chrono::seconds(1));
 

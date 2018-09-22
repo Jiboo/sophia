@@ -341,6 +341,17 @@ source and a signature so that other nodes may verify that the event wasn't
 tempered with. Fields `event_signature` and `height` shouldn't be used to
 compute the signature of the event.
 
+Impl notes (TODO: Maybe put in a GitHub issue): I'm using a `event_replication`
+although I'm not satisfied with the reliability. Although implementing
+something more reliable might be possible through RPC in a library contract.
+So I won't increase the replication, that has a huge impact on traffic.
+
+I take a different codepath if the publisher has less than 20 nodes in its
+table, he forwards it to all known nodes. This fixes reliability issues for
+topic with 20 or less users, altough the [20-100] range is painfully
+unreliable, above 100 we're at 80% reach.
+
+
 RPC
 ---
 
@@ -424,3 +435,21 @@ to:
 - rpc on other nodes (for unicast)
 - sodium crypto
 - zlib compression
+
+
+Performances
+------------
+
+Thus charts where generated using stats dumped by tst/network.cpp
+([details](https://docs.google.com/spreadsheets/d/189yyDMZGnVGXWnAGIDQU8gQEYjUCgjoe7d_x6gyTRhw/edit?usp=sharing)).
+
+[store delay vs node count](res/store_delay.png)
+[store traffic vs node count](res/store_traffic.png)
+
+[find delay vs node count](res/find_delay.png)
+[find hops vs node count](res/find_hops.png)
+[find traffic vs node count](res/find_traffic.png)
+
+[event coverage vs node count](res/pub_coverage.png)
+[event propagation delay vs node count](res/pub_delay.png)
+[event traffic vs node count](res/pub_traffic.png)
